@@ -136,7 +136,8 @@ if is_root; then
 
 	# Unattended: the user may have no password, so allow passwordless sudo for this run only.
 	temp_sudoers=''
-	if [[ "${ASSUME_DEFAULTS:-0}" == 1 ]] && ! sudo -l -n -U "$FRAPPE_USER" 2>/dev/null | grep -q NOPASSWD; then
+	# (Test real access: `bench setup sudoers` adds NOPASSWD rules for a few commands only.)
+	if [[ "${ASSUME_DEFAULTS:-0}" == 1 ]] && ! sudo -u "$FRAPPE_USER" sudo -n true 2>/dev/null; then
 		temp_sudoers="/etc/sudoers.d/zz-frappe-setup-$FRAPPE_USER"
 		printf '# Temporary, removed when install.sh finishes\n%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$FRAPPE_USER" >"$temp_sudoers"
 		chmod 440 "$temp_sudoers"

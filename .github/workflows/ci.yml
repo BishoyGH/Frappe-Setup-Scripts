@@ -59,6 +59,9 @@ jobs:
             -v "$PWD:/src:ro" -v "$PWD/logs:/logs" \
             '${{ matrix.image }}' \
             bash /src/tests/container-install.sh '${{ matrix.mode }}' '${{ matrix.apps }}'
+      - name: Make logs readable
+        if: always()
+        run: sudo chmod -R a+rX logs || true
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
