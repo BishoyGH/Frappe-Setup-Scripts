@@ -39,6 +39,8 @@ if is_root; then
 		chown -R "$FRAPPE_USER:" "$dest"
 	fi
 	info "Continuing as '$FRAPPE_USER' (sudo will ask for that user's password)."
+	# Leave a working directory the new user may not be able to read (e.g. /root).
+	cd "$user_home"
 	exec sudo -u "$FRAPPE_USER" -H \
 		--preserve-env=ASSUME_DEFAULTS,DB_ROOT_PASSWORD,ADMIN_PASSWORD,NO_COLOR \
 		bash "$dest/install.sh" "$@"

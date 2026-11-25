@@ -14,6 +14,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/prereqs.sh"
 # shellcheck source=lib/apps.sh
 . "$SCRIPT_DIR/lib/apps.sh"
+# shellcheck source=lib/ops.sh
+. "$SCRIPT_DIR/lib/ops.sh"
 strict_mode
 
 if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
@@ -33,6 +35,7 @@ use_node_for_bench "$BENCH"
 mapfile -t SITES < <(bench_sites "$BENCH")
 mapfile -t APPS < <(bench_apps "$BENCH")
 PROD=0; bench_is_production "$BENCH" && PROD=1
+ops_load_conf "$BENCH"
 
 # app_remote <app>: upstream URL for an app's repository
 app_remote() {
@@ -73,7 +76,14 @@ check_dirty() {
 	esac
 }
 
+# backup_sites: take a restore point (app commits + database dumps) so a failed update can be
+# rolled back automatically; or, if declined, a plain backup.
+RESTORE_POINT=''
 backup_sites() {
+	if ask_yes_no "Create a restore point first (app versions + database backups) so a failed update is rolled back?" y; then
+		RESTORE_POINT=$(restore_point_create "$BENCH" "before-$ACTION") || die "Could not create the restore point; nothing was changed."
+		return 0
+	fi
 	((${#SITES[@]})) || return 0
 	if ask_yes_no "Back up all ${#SITES[@]} site(s) before updating?" y; then
 		local with_files=()
@@ -85,6 +95,41 @@ backup_sites() {
 		done
 		success "Backups are in $BENCH/sites/<site>/private/backups"
 	fi
+}
+
+# update_failed <what>: report a failed step and roll back to the restore point if there is one.
+update_failed() {
+	error "$1 did not finish."
+	if [[ -n "$RESTORE_POINT" ]]; then
+		local def=y
+		[[ "${FSS_AUTO_ROLLBACK:-1}" == 1 ]] || def=n
+		if ask_yes_no "Roll the bench back to the restore point taken before this run?" "$def"; then
+			if restore_point_rollback "$BENCH" "$RESTORE_POINT"; then
+				ops_notify fail "Update of bench $(basename "$BENCH") failed ($1) and was rolled back."
+				die "The update failed and the bench was rolled back. Log: ${FSS_LOG_FILE:-}"
+			fi
+			ops_notify fail "Update of bench $(basename "$BENCH") failed ($1); the rollback also had errors."
+			die "Rollback had errors. Retry it with: ./ops.sh rollback"
+		fi
+		error "You can roll back later with: ./ops.sh rollback"
+	fi
+	error "Sites may still be in maintenance mode. After fixing the problem, re-run this script, or bring sites back with:"
+	error "  cd $BENCH && bench set-config -g maintenance_mode 0 && bench set-config -g pause_scheduler 0"
+	ops_notify fail "Update of bench $(basename "$BENCH") failed ($1)."
+	exit 1
+}
+
+# verify_sites: after an update, make sure every site still answers; offer a rollback if not.
+verify_sites() {
+	((PROD)) || return 0
+	((${#SITES[@]})) || return 0
+	local s bad=()
+	with_bench "$BENCH" restart >/dev/null 2>&1 || as_root supervisorctl restart all >/dev/null 2>&1 || true
+	info "Checking that every site answers..."
+	for s in "${SITES[@]}"; do wait_site_responds "$BENCH" "$s" 90 || bad+=("$s"); done
+	((${#bad[@]})) || { success "All sites answer."; return 0; }
+	warn "Not answering after the update: ${bad[*]}"
+	[[ -n "$RESTORE_POINT" ]] && update_failed "Health check after the update"
 }
 
 warn_dev_server() {
@@ -101,16 +146,12 @@ do_update() {
 	backup_sites
 	header "Updating apps and migrating all sites"
 	run_bench_update --no-backup "${RESET_FLAG[@]}" "$@"
+	verify_sites
 }
 
-# run_bench_update <args...>: bench update, with a clear message if it stops half-way.
+# run_bench_update <args...>: bench update, rolling back if it stops half-way.
 run_bench_update() {
-	if ! with_bench "$BENCH" update "$@"; then
-		error "bench update did not finish. Sites may still be in maintenance mode."
-		error "After fixing the problem, re-run this script, or bring sites back with:"
-		error "  cd $BENCH && bench set-config -g maintenance_mode 0 && bench set-config -g pause_scheduler 0"
-		exit 1
-	fi
+	with_bench "$BENCH" update "$@" || update_failed "bench update"
 }
 
 do_upgrade() {
@@ -181,15 +222,15 @@ do_upgrade() {
 	done
 	for branch in "${!BY_BRANCH[@]}"; do
 		# shellcheck disable=SC2086
-		with_bench "$BENCH" switch-to-branch "$branch" ${BY_BRANCH[$branch]} --upgrade
+		with_bench "$BENCH" switch-to-branch "$branch" ${BY_BRANCH[$branch]} --upgrade || update_failed "Switching to $branch"
 	done
 
 	if ((change_py)); then
 		install_uv
 		local pybin
-		pybin=$(install_python "$py")
+		pybin=$(install_python "$py") || update_failed "Installing Python $py"
 		header "Rebuilding the Python environment with Python $py"
-		with_bench "$BENCH" migrate-env "$pybin"
+		with_bench "$BENCH" migrate-env "$pybin" || update_failed "Rebuilding the Python environment"
 	fi
 
 	header "Installing requirements, migrating sites and building assets"
@@ -199,6 +240,7 @@ do_upgrade() {
 			-e "s/^NODE_VERSION=.*/NODE_VERSION=$node/" "$BENCH/.frappe-setup.env"
 	fi
 	((PROD)) && reload_production "$BENCH"
+	verify_sites
 }
 
 do_apps() {
