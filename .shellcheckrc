@@ -1,0 +1,3 @@
+# Variables are often assigned indirectly by the prompt helpers (printf -v / eval).
+disable=SC2153,SC2154
+external-sources=true
