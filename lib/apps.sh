@@ -95,9 +95,11 @@ remote_ref_exists() { # remote_ref_exists <url> <branch-or-tag>
 	git ls-remote --exit-code "$1" "refs/heads/$2" "refs/tags/$2" >/dev/null 2>&1
 }
 
-# frappe_release_branches: version-N branches of frappe, newest first
+# frappe_release_branches [limit]: version-N branches of frappe, newest first.
+# (Limited with awk rather than `| head`, which would kill sort with SIGPIPE under pipefail.)
 frappe_release_branches() {
-	remote_branches https://github.com/frappe/frappe | grep -E '^version-[0-9]+$' | sort -t- -k2 -nr
+	remote_branches https://github.com/frappe/frappe | grep -E '^version-[0-9]+$' | sort -t- -k2 -nr |
+		awk -v n="${1:-0}" 'n == 0 || NR <= n'
 }
 
 # pick_app_branch <repo-url> <frappe-branch>: best matching branch for an app.

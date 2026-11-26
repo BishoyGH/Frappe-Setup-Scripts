@@ -12,22 +12,27 @@ WKHTMLTOX_RELEASE="${WKHTMLTOX_RELEASE:-0.12.6.1-3}"
 # --------------------------------------------------------------------------
 # Package manager wrappers
 # --------------------------------------------------------------------------
+# Wait for other package managers (e.g. unattended-upgrades on a fresh cloud VM) instead of failing.
+APT_OPTS=(-o DPkg::Lock::Timeout=600 -o Acquire::Retries=3)
 _APT_UPDATED=0
 apt_install() {
 	if ((!_APT_UPDATED)); then
-		run as_root env DEBIAN_FRONTEND=noninteractive apt-get update -y
+		run as_root env DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" update -y
 		_APT_UPDATED=1
 	fi
-	run as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+	run as_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+		apt-get "${APT_OPTS[@]}" install -y --no-install-recommends "$@"
 }
 
 _PACMAN_SYNCED=0
+pacman_sync() {
+	((_PACMAN_SYNCED)) && return 0
+	# Arch does not support partial upgrades, so sync + upgrade once.
+	run as_root pacman -Syu --noconfirm
+	_PACMAN_SYNCED=1
+}
 pacman_install() {
-	if ((!_PACMAN_SYNCED)); then
-		# Arch does not support partial upgrades, so sync + upgrade once.
-		run as_root pacman -Syu --noconfirm
-		_PACMAN_SYNCED=1
-	fi
+	pacman_sync
 	run as_root pacman -S --needed --noconfirm "$@"
 }
 
@@ -38,7 +43,9 @@ pkg_install() {
 	esac
 }
 
-pacman_has() { pacman -Si "$1" >/dev/null 2>&1; }
+# pacman_has <pkg>: is the package in the repositories? (needs synced databases; fresh
+# Arch containers ship without them, so sync first or every lookup says "no".)
+pacman_has() { pacman_sync; pacman -Si "$1" >/dev/null 2>&1; }
 
 # --------------------------------------------------------------------------
 # Bootstrap when the script is started as root on a bare system
@@ -58,8 +65,13 @@ create_bench_user() {
 		info "User '$user' already exists."
 	else
 		run useradd -m -s /bin/bash "$user"
-		ask_secret pw "Password for new user '$user'" yes FRAPPE_USER_PASSWORD
-		printf '%s:%s\n' "$user" "$pw" | chpasswd
+		if [[ "${ASSUME_DEFAULTS:-0}" == 1 && -z "${FRAPPE_USER_PASSWORD:-}" ]]; then
+			# Unattended: no password; the installer grants sudo for its own run only.
+			warn "Created '$user' without a password (FRAPPE_USER_PASSWORD not set). Set one later with: sudo passwd $user"
+		else
+			ask_secret pw "Password for new user '$user'" yes FRAPPE_USER_PASSWORD
+			printf '%s:%s\n' "$user" "$pw" | chpasswd
+		fi
 		success "Created user '$user'."
 	fi
 	getent group "$group" >/dev/null || groupadd "$group"
@@ -199,6 +211,7 @@ mariadb_password_works() {
 # configure_mariadb_root <varname>: make sure root has a password; store it in <varname>.
 configure_mariadb_root() {
 	local __var=$1 __pw=''
+	mask_secret "${DB_ROOT_PASSWORD:-}"
 	if [[ -n "${DB_ROOT_PASSWORD:-}" ]] && mariadb_password_works "$DB_ROOT_PASSWORD"; then
 		printf -v "$__var" '%s' "$DB_ROOT_PASSWORD"; success "MariaDB root password verified."; return 0
 	fi
@@ -318,7 +331,7 @@ install_node() {
 	load_runtime_env
 	if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
 		header "Installing nvm $NVM_VERSION"
-		curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | PROFILE=/dev/null bash
+		curl -fsSL --retry 3 "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | PROFILE=/dev/null bash
 	fi
 	load_runtime_env
 	command -v nvm >/dev/null 2>&1 || die "nvm installation failed."

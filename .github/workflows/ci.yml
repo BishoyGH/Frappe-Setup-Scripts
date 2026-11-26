@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      frappe_branch:
+        description: Frappe branch for the install tests (latest = newest version-N)
+        default: latest
+  schedule:
+    # Weekly, to catch upstream changes (Frappe, distro packages) before users do.
+    - cron: "17 4 * * 1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: shellcheck + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -x *.sh lib/*.sh tests/*.sh
+      - name: bash syntax
+        run: for f in *.sh lib/*.sh tests/*.sh; do bash -n "$f"; done
+      - name: unit tests
+        run: bash tests/run-tests.sh
+
+  install:
+    name: install / ${{ matrix.image }} / ${{ matrix.mode }}${{ matrix.apps && format(' + {0}', matrix.apps) || '' }}
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "ubuntu:26.04", mode: development }
+          - { image: "ubuntu:26.04", mode: production }
+          - { image: "ubuntu:24.04", mode: development }
+          - { image: "ubuntu:24.04", mode: production, apps: erpnext }
+          - { image: "ubuntu:22.04", mode: development }
+          - { image: "debian:12", mode: development }
+          - { image: "debian:12", mode: production }
+          - { image: "debian:13", mode: development }
+          - { image: "archlinux:latest", mode: development }
+          - { image: "archlinux:latest", mode: production }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install in a fresh ${{ matrix.image }} container
+        run: |
+          mkdir -p logs
+          docker run --rm --hostname ci-host \
+            -e FRAPPE_BRANCH='${{ inputs.frappe_branch || 'latest' }}' \
+            -v "$PWD:/src:ro" -v "$PWD/logs:/logs" \
+            '${{ matrix.image }}' \
+            bash /src/tests/container-install.sh '${{ matrix.mode }}' '${{ matrix.apps }}'
+      - name: Make logs readable
+        if: always()
+        run: sudo chmod -R a+rX logs || true
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ strategy.job-index }}-${{ matrix.mode }}
+          path: logs/
+          if-no-files-found: ignore
