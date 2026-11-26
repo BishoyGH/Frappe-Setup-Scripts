@@ -80,7 +80,7 @@ All questions come first, so once you confirm the summary the install runs witho
 1. **Setup type**: development (`bench start`, developer mode) or production (nginx + supervisor).
 2. **System check**: memory and swap, CPU, free disk (home and `/var/lib` for MariaDB), whether the ports
    are free (8000, 9000, 11000, 13000 in development; 80 and 443 in production), whether GitHub, PyPI and
-   npm can be reached, WSL 1 vs 2, and systemd. Failed checks ask whether to go on. On a small machine
+   npm can be reached, WSL 1 vs 2, and systemd. Failed checks ask whether to go on (unattended runs warn and continue; `FSS_STRICT_CHECKS=1` makes them stop, `FSS_SKIP_CHECKS=1` never stops). Resumed installs skip the check. On a small machine
    without swap it offers to create a 4 GB swap file so asset builds do not run out of memory.
 3. **Frappe version**: the newest release branches are read live from GitHub (e.g. `version-16`,
    `version-15`, `version-14`), plus `develop` or any custom branch/tag such as `v15.50.0`.
