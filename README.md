@@ -6,10 +6,11 @@ updated and manage its sites.
 
 | Script | What it does |
 | --- | --- |
-| `frappe-setup.sh` | Main menu that launches the three scripts below |
+| `frappe-setup.sh` | Main menu that launches the scripts below |
 | `install.sh` | Installs every prerequisite, creates a bench, fetches the apps you pick and (optionally) creates a site, for **development** or **production** |
 | `update-bench.sh` | Updates an existing bench and **all** of its sites, or upgrades it to a new Frappe major version |
 | `manage-sites.sh` | Create, migrate, back up, restore and remove sites; install or uninstall apps; get new apps; set the default site; HTTPS / developer mode |
+| `ops.sh` | Production operations: scheduled backups with retention and encrypted offsite copies, restore (also from another server), rollback of a failed update, health checks with alerts, firewall/fail2ban/MariaDB tuning, custom domains and certificate renewal |
 
 ## Supported systems
 
@@ -93,8 +94,13 @@ cd ~/frappe-bench && nvm use && bench start
 - **apps**: update only the apps you choose.
 - **migrate** / **build**: run only that step.
 
-Before changing anything it offers to back up all sites, and it checks the app repositories for
-uncommitted changes (stash, discard or abort).
+Before changing anything it checks the app repositories for uncommitted changes (stash, discard or
+abort) and creates a **restore point**: the commit of every app, the Python and Node versions, and a
+database dump of every site. If `bench update`, a branch switch or the Python rebuild fails, or a
+production site stops answering afterwards, the script rolls the bench back to that restore point
+(apps, Python env, requirements, databases, assets) and takes the sites out of maintenance mode.
+`FSS_AUTO_ROLLBACK=0` makes it ask instead of rolling back by default. You can also roll back later
+with `./ops.sh rollback`. The last 3 restore points are kept.
 
 ## Managing sites (`manage-sites.sh`)
 
@@ -112,6 +118,62 @@ A menu that loops until you quit:
 - production: set up HTTPS with Let's Encrypt; development: toggle developer mode
 
 In production, nginx and supervisor are reloaded automatically after a site is added or removed.
+
+## Production operations (`ops.sh`)
+
+```bash
+./ops.sh                      # menu
+./ops.sh status               # health check (exit code 0 ok, 1 warnings, 2 failures)
+./ops.sh backup               # back up every site now
+./ops.sh schedule             # automatic backups, offsite copies, alerts
+./ops.sh restore              # restore a site from a local or offsite backup
+./ops.sh rollback             # undo an update
+./ops.sh secure               # firewall, fail2ban, swap, security updates, MariaDB tuning
+./ops.sh domain | ssl         # custom domains, certificate expiry and renewal
+```
+
+**Backups.** Each run backs up every site (database, public and private files, site config) into
+`~/frappe-backups/<bench>/<site>/`, outside the bench so a broken bench does not take its backups
+with it. Old sets are deleted after `BACKUP_KEEP_DAYS` (14), but the newest `BACKUP_KEEP_MIN` (7)
+sets of each site are always kept, so a server that stopped backing up never loses its last good
+backups. `schedule` installs a cron job (daily, every 12 h, 6 h or hourly) guarded by `flock`, and logs
+to `~/frappe-backups/<bench>/backup.log`.
+
+**Offsite copies.** `schedule` can copy every backup to S3-compatible storage (AWS S3, Cloudflare R2,
+Backblaze B2, Wasabi, DigitalOcean Spaces, MinIO) or to any [rclone](https://rclone.org) remote
+(SFTP, Google Drive, ...). Backups can be encrypted on the server before upload (rclone crypt); the
+password is shown once and must be kept somewhere safe, because it is needed to restore on another
+server. Offsite copies older than `OFFSITE_KEEP_DAYS` (30) are deleted, only right after a successful
+upload. Keys are stored in rclone's config (`~/.config/rclone/rclone.conf`, mode 600), not on the
+command line.
+
+**Restore.** Pick a site, then a backup from the local folder, the offsite storage, bench's own
+backup folder, or any path. Backups of another site can be restored into this one (for example to
+copy production into a staging site), and a backup from another server brings its `encryption_key`
+along so saved passwords and API keys still decrypt. The current state is backed up first.
+
+**Health check.** `status` checks MariaDB, the bench's Redis, nginx and every supervisor process, that
+each site answers `/api/method/ping`, maintenance mode, whether the scheduler is enabled, disk and
+memory, the age of the newest backup and the backup schedule, offsite copies and certificate expiry.
+With a webhook (Slack, Discord, Mattermost) set in `schedule`, it can run every 10 minutes and alert
+when something breaks and when it recovers (repeated every 6 hours while it stays broken). Backup
+failures and failed updates are alerted too.
+
+**Secure.** One step at a time, each with a question: ufw allowing only SSH (the port you are
+connected on is always kept open), HTTP and HTTPS; fail2ban for SSH; unattended security updates
+(Debian/Ubuntu); a swap file on small machines plus `vm.overcommit_memory=1` for Redis; MariaDB sized
+to the machine's RAM (`innodb_buffer_pool_size`, log file size, slow query log) in a separate
+`zz-frappe-tuning.cnf`.
+
+**Domains and certificates.** `domain` adds or removes a custom domain on a site, regenerates the
+nginx config and can get a Let's Encrypt certificate for it. `ssl` lists certificate expiry for every
+site and domain and adds a renewal job if none exists.
+
+Settings are stored per bench in `<bench>/.frappe-ops.conf` (mode 600). Variables set in the
+environment win over the file, for example
+`BENCH_PATH=~/frappe-bench BACKUP_KEEP_DAYS=30 ./ops.sh backup --no-offsite`.
+The cron jobs run the scripts from where they are, so keep this folder in place (or run `schedule`
+again after moving it).
 
 ## Unattended installs
 
@@ -134,7 +196,8 @@ given passwordless sudo only while the installer runs.
 
 `update-bench.sh` takes `--yes --action update|upgrade|apps|migrate|build [bench-path]`, e.g. for cron:
 `./update-bench.sh --yes --action update ~/frappe-bench`. Other variables: `BENCH_PATH` (bench used by
-the update/site scripts), `FSS_LOG_DIR`, `NO_COLOR=1`.
+the update/site/ops scripts), `FSS_LOG_DIR`, `FSS_AUTO_ROLLBACK=0`, `NO_COLOR=1`. For `ops.sh schedule`:
+`S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `OFFSITE_CRYPT_PASSWORD`.
 
 ## Re-running and resuming
 
@@ -165,9 +228,11 @@ frappe-setup.sh     main menu
 install.sh          new bench
 update-bench.sh     update / upgrade a bench
 manage-sites.sh     site management
+ops.sh              backups, restore, rollback, health checks, hardening, domains
 lib/common.sh       prompts, OS detection, services, bench helpers
 lib/prereqs.sh      packages, MariaDB, wkhtmltopdf, uv/Python, nvm/Node, bench, nginx/supervisor
 lib/apps.sh         official app catalog, dependencies, branch matching
+lib/ops.sh          backup sets, offsite (rclone), restore points and rollback, health checks, cron
 lib/unattended.sh   preset answers (flags / answers file) and resumable steps
 examples/           sample answers file for unattended installs
 tests/              unit tests and the container install test used by CI

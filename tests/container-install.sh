@@ -5,6 +5,7 @@
 #   2. the same command again: must resume and finish
 #   3. the same command a third time: must notice the finished install and exit 0
 #   4. smoke test: the site answers ping (bench execute in development, HTTP via nginx in production)
+#   5. ops.sh: back up the site, restore it from that backup, run the health check
 #
 # Usage: tests/container-install.sh <development|production> [apps]
 # Expects the repository at /src. Logs go to $FSS_LOG_DIR (default /logs).
@@ -73,4 +74,17 @@ fi
 apps=$(sudo -u frappe -H bash -lc "cd ~/ci-bench && ~/.local/bin/bench --site $SITE list-apps")
 echo "$apps"
 for a in ${APPS//,/ }; do grep -q "^$a" <<<"$apps" || { echo "$a is not installed on $SITE" >&2; exit 1; }; done
+
+step "ops.sh: backup, restore, status"
+ops() { sudo -u frappe -H env ASSUME_DEFAULTS=1 NO_COLOR=1 FSS_LOG_DIR="$FSS_LOG_DIR" DB_ROOT_PASSWORD="$DB_ROOT_PASSWORD" \
+	BENCH_PATH=/home/frappe/ci-bench bash /home/frappe/Frappe-Setup-Scripts/ops.sh "$@"; }
+ops backup --no-offsite
+ls /home/frappe/frappe-backups/ci-bench/"$SITE"/*-database.sql.gz >/dev/null || { echo "ops.sh backup wrote no database dump" >&2; exit 1; }
+ops restore --site "$SITE" --yes
+rc=0; ops status 2>&1 | tee /tmp/status.log || rc=$?
+echo "status exit code: $rc"
+((rc <= 2)) || { echo "ops.sh status crashed" >&2; exit 1; }
+if [[ "$MODE" == production ]]; then
+	grep -q "$SITE .*answers /api/method/ping" /tmp/status.log || { echo "status did not see the site answering" >&2; exit 1; }
+fi
 echo "All checks passed ($MODE${APPS:+, apps: $APPS})."

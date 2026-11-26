@@ -2,7 +2,7 @@
 # Offline tests for the helper functions in lib/. No network, no root, no Frappe needed.
 # Usage: tests/run-tests.sh
 
-# shellcheck disable=SC2015,SC2012,SC2016,SC2116,SC2329  # test idioms: "cond && ok || bad"
+# shellcheck disable=SC2015,SC2012,SC2016,SC2116,SC2329,SC2030,SC2031  # test idioms: "cond && ok || bad"
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP=$(mktemp -d)
@@ -16,6 +16,8 @@ mkdir -p "$HOME"
 . "$ROOT/lib/apps.sh"
 # shellcheck source=lib/unattended.sh
 . "$ROOT/lib/unattended.sh"
+# shellcheck source=lib/ops.sh
+. "$ROOT/lib/ops.sh"
 
 PASS=0 FAIL=0 CURRENT=''
 t() { CURRENT=$1; }
@@ -196,6 +198,72 @@ fails bash "$ROOT/install.sh" --bogus
 fails bash "$ROOT/install.sh" --mode
 fails bash "$ROOT/install.sh" --config "$TMP/missing.conf"
 bash "$ROOT/install.sh" --help | grep -q -- '--non-interactive' && ok || bad "--help lists options"
+
+# --------------------------------------------------------------------------
+t "backup sets and retention"
+BK="$TMP/backups"; mkdir -p "$BK"
+for d in 1 3 10 20 30 40; do
+	ts=$(date -d "-$d days" +%Y%m%d_%H%M%S)
+	for p in database.sql.gz files.tgz private-files.tgz site_config_backup.json; do touch "$BK/$ts-s1_test-$p"; done
+done
+touch "$BK/unrelated.txt"
+eq 6 "$(backup_sets "$BK" | wc -l | tr -d ' ')" "six sets"
+newest=$(backup_sets "$BK" | head -1)
+eq "$(date -d '-1 days' +%Y%m%d)" "${newest:0:8}" "newest first"
+eq "$BK/$newest-files.tgz" "$(backup_set_part "$BK" "$newest" files)" "set part"
+backup_set_part "$BK" "$newest" nope >/dev/null && bad "missing part found" || ok
+prune_backup_sets "$BK" 14 2 2>/dev/null
+eq 3 "$(backup_sets "$BK" | wc -l | tr -d ' ')" "keeps sets newer than 14 days"
+prune_backup_sets "$BK" 0 2 2>/dev/null
+eq 2 "$(backup_sets "$BK" | wc -l | tr -d ' ')" "always keeps the newest 2"
+[[ -f "$BK/unrelated.txt" ]] && ok || bad "other files are left alone"
+eq 0 "$(newest_backup_age_hours "$BK" | tr -d ' ')" "age of the newest backup (mtime)"
+eq '' "$(newest_backup_age_hours "$TMP/none")" "no backup dir"
+
+t "offsite paths"
+eq "r:site1" "$(offsite_join "r:" site1)"
+eq "r:bucket/p/site1" "$(offsite_join "r:bucket/p/" site1)"
+eq "r:/srv/b/site1" "$(offsite_join "r:/srv/b" site1)"
+
+t "ops settings"
+B="$TMP/bench"; mkdir -p "$B"
+( ops_load_conf "$B"; eq 14 "$BACKUP_KEEP_DAYS"; eq "$HOME/frappe-backups/bench" "$BACKUP_DIR"
+  OFFSITE_REMOTE='fo-x:my bucket/a b'; NOTIFY_WEBHOOK='https://h/x?a=1&b=$2'; ops_save_conf "$B" 2>/dev/null )
+eq 600 "$(stat -c %a "$B/.frappe-ops.conf")" "conf is private"
+( ops_load_conf "$B"; eq 'fo-x:my bucket/a b' "$OFFSITE_REMOTE"; eq 'https://h/x?a=1&b=$2' "$NOTIFY_WEBHOOK" )
+( export BACKUP_KEEP_DAYS=30; ops_load_conf "$B"; eq 30 "$BACKUP_KEEP_DAYS" "environment wins over the file" )
+
+t "site database settings"
+mkdir -p "$B/sites/s1"
+printf '{"db_host": "db.internal"}' >"$B/sites/common_site_config.json"
+printf '{"db_name": "_abc", "db_password": "p\x27w \\"x"}' >"$B/sites/s1/site_config.json"
+( site_db_info "$B" s1 && ok || bad "site_db_info"
+  eq _abc "$SDB_NAME"; eq _abc "$SDB_USER" "user defaults to db name"; eq "p'w \"x" "$SDB_PASS"
+  eq db.internal "$SDB_HOST" "common config"; eq 3306 "$SDB_PORT"; eq mariadb "$SDB_TYPE" )
+
+t "mariadb tuning sizes"
+( awk() { command awk "$@"; }
+  read -r pool log < <(mariadb_tuning_values 2>/dev/null || true)
+  [[ "$pool" =~ ^[0-9]+$ ]] && ((pool >= 256 && pool % 128 == 0)) && ok || bad "pool $pool"
+  [[ "$log" =~ ^[0-9]+$ ]] && ((log >= 64 && log <= 2048)) && ok || bad "log $log" ) 2>/dev/null || true
+
+t "cron entries"
+if command -v crontab >/dev/null 2>&1; then
+	crontab() { if [[ "${1:-}" == -l ]]; then cat "$TMP/crontab" 2>/dev/null; else cat >"$TMP/crontab.new" && mv "$TMP/crontab.new" "$TMP/crontab"; fi; }
+	echo '0 1 * * * other job' >"$TMP/crontab"
+	cron_set "backup:/b 1" "1 2 * * *" "echo a"
+	cron_set "backup:/b 1" "3 4 * * *" "echo b"
+	cron_set "status:/b 1" "*/10 * * * *" "echo s"
+	eq 3 "$(wc -l <"$TMP/crontab" | tr -d ' ')" "replaced, not duplicated"
+	eq "3 4 * * * echo b # frappe-ops:backup:/b 1" "$(cron_get "backup:/b 1")"
+	cron_remove "backup:/b 1"; cron_remove "status:/b 1"
+	eq "0 1 * * * other job" "$(cat "$TMP/crontab")" "other jobs kept"
+	unset -f crontab
+fi
+
+t "ops.sh argument handling"
+fails bash "$ROOT/ops.sh" bogus
+bash "$ROOT/ops.sh" --help | grep -q 'rollback' && ok || bad "--help lists commands"
 
 # --------------------------------------------------------------------------
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

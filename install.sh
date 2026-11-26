@@ -154,6 +154,8 @@ if is_root; then
 	export DB_ROOT_PASSWORD ADMIN_PASSWORD
 	info "Continuing as '$FRAPPE_USER'$([[ -z "$temp_sudoers" ]] && echo " (sudo may ask for that user's password)")."
 	rc=0
+	# Leave a working directory the new user may not be able to read (e.g. /root).
+	cd "$user_home"
 	sudo -u "$FRAPPE_USER" -H \
 		--preserve-env=ASSUME_DEFAULTS,DB_ROOT_PASSWORD,ADMIN_PASSWORD,NO_COLOR,FSS_LOG_DIR,FSS_FAIL_AFTER_STEP \
 		bash "$dest/install.sh" "${child_args[@]}" || rc=$?
