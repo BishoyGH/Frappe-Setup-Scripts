@@ -5,8 +5,9 @@
 #  - apps:    update only some apps
 #  - migrate / build: run just that step
 #
-# Usage: ./update-bench.sh [--yes] [--action update|upgrade|apps|migrate|build] [bench-path]
+# Usage: ./update-bench.sh [--yes] [--action update|upgrade|apps|migrate|build] [--plain] [--quiet] [bench-path]
 #   --yes accepts every default (e.g. for cron: ./update-bench.sh --yes --action update ~/frappe-bench)
+#   --plain / --quiet: plain prompts instead of dialog boxes / a spinner instead of full output
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -20,10 +21,11 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 strict_mode
 
 FSS_ARGS="$*"
+ui_parse_flags "$@"; set -- "${FSS_REST_ARGS[@]}"
 ACTION=''
 while (($#)); do
 	case "$1" in
-		-h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; echo; ui_flags_help; exit 0 ;;
 		-y|--yes|--non-interactive) ASSUME_DEFAULTS=1 ;;
 		--action) [[ $# -ge 2 ]] || die "--action needs a value."; ACTION=$2; shift ;;
 		--action=*) ACTION=${1#*=} ;;
@@ -35,6 +37,7 @@ done
 case "${ACTION:-update}" in update|upgrade|apps|migrate|build|quit) ;; *) die "Unknown action: $ACTION" ;; esac
 
 setup_logging update-bench
+ui_set_title "Frappe Setup Scripts · Bench updater"
 header "Frappe bench updater"
 is_root && die "Run this script as the user that owns the bench, not as root."
 detect_os
@@ -56,14 +59,15 @@ app_remote() {
 
 show_status() {
 	header "Bench status: $BENCH"
-	printf '   %-24s %-16s %s\n' APP BRANCH VERSION >&2
-	local a ver
+	local a ver out
+	out=$(printf '   %-24s %-16s %s' APP BRANCH VERSION)
 	for a in "${APPS[@]}"; do
 		ver=$(grep -hoE '^__version__\s*=\s*"[^"]+"' "$BENCH/apps/$a/$a/__init__.py" 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' || true)
-		printf '   %-24s %-16s %s\n' "$a" "$(app_branch "$BENCH" "$a")" "${ver:-?}" >&2
+		out+=$'\n'$(printf '   %-24s %-16s %s' "$a" "$(app_branch "$BENCH" "$a")" "${ver:-?}")
 	done
-	printf '\n   Sites: %s\n' "${SITES[*]:-(none)}" >&2
-	printf '   Mode:  %s\n\n' "$( ((PROD)) && echo production || echo development)" >&2
+	out+=$'\n\n'"   Sites: ${SITES[*]:-(none)}"
+	out+=$'\n'"   Mode:  $( ((PROD)) && echo production || echo development)"
+	ui_details "$out"
 }
 
 # check_dirty: returns 0 if every app repo is clean, otherwise asks what to do.
@@ -186,15 +190,16 @@ do_upgrade() {
 	fi
 
 	declare -A NEW_BRANCH=()
-	printf '\n   %-24s %-16s %s\n' APP CURRENT NEW >&2
+	local table
+	table=$(printf '   %-24s %-16s %s' APP CURRENT NEW)
 	for a in "${APPS[@]}"; do
 		url=$(app_remote "$a")
 		if [[ -z "$url" ]]; then NEW_BRANCH[$a]=''; continue; fi
 		branch=$(pick_app_branch "$url" "$target" || true)
 		NEW_BRANCH[$a]=$branch
-		printf '   %-24s %-16s %s\n' "$a" "$(app_branch "$BENCH" "$a")" "${branch:-(unchanged: no remote)}" >&2
+		table+=$'\n'$(printf '   %-24s %-16s %s' "$a" "$(app_branch "$BENCH" "$a")" "${branch:-(unchanged: no remote)}")
 	done
-	echo >&2
+	ui_details "$table"
 	if ! ask_yes_no "Use these branches?" y; then
 		for a in "${APPS[@]}"; do
 			[[ -z "${NEW_BRANCH[$a]}" ]] && continue
