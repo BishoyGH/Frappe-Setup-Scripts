@@ -16,10 +16,10 @@ _FSS_TUI_BIN='' _FSS_TUI_CHECKED=0
 _UI_DETAILS='' _UI_SECTION='' _UI_OUT=''
 _UI_BACKTITLE='Frappe Setup Scripts'
 
-# ui_parse_flags "$@": consume the UI flags shared by every script; the rest ends up in FSS_ARGS.
-FSS_ARGS=()
+# ui_parse_flags "$@": consume the UI flags shared by every script; the rest ends up in FSS_REST_ARGS.
+FSS_REST_ARGS=()
 ui_parse_flags() {
-	FSS_ARGS=()
+	FSS_REST_ARGS=()
 	local a
 	for a in "$@"; do
 		case "$a" in
@@ -27,7 +27,7 @@ ui_parse_flags() {
 			--tui) export FSS_UI=tui ;;
 			--quiet|-q) export FSS_QUIET=1 ;;
 			--verbose|-v) export FSS_QUIET=0 ;;
-			*) FSS_ARGS+=("$a") ;;
+			*) FSS_REST_ARGS+=("$a") ;;
 		esac
 	done
 	_FSS_TUI_CHECKED=0
@@ -143,7 +143,7 @@ _ui_dialog() {
 		((lh > _UI_ROWS - lines - 9)) && lh=$((_UI_ROWS - lines - 9))
 		((lh < 3)) && lh=3
 		((lh > n)) && lh=$n
-		h=$((h + lh))
+		h=$((h + lh + 1))
 	fi
 	[[ "$kind" == inputbox || "$kind" == passwordbox ]] && h=$((h + 2))
 	((h > _UI_ROWS - 2)) && h=$((_UI_ROWS - 2))
@@ -480,10 +480,11 @@ ui_quiet_active() { [[ "${FSS_QUIET:-0}" == 1 && -n "${FSS_LOG_FILE:-}" ]]; }
 
 # _ui_run_quiet <cmd...>: used by run() in quiet mode.
 _ui_run_quiet() {
-	local label="$*" rc=0 t0 cols=80 lw
+	local label rc=0 t0 cols=80 lw
+	label=$(masked "$*")
 	label=${label//$'\n'/ }
 	((${#label} > 50)) && label="${label:0:47}..."
-	printf '$ %s\n' "$*" >>"$FSS_LOG_FILE"
+	printf '$ %s\n' "$(masked "$*")" >>"$FSS_LOG_FILE"
 	t0=$(date +%s)
 	if _ui_has_tty; then
 		_ui_size; cols=$_UI_COLS
@@ -512,7 +513,7 @@ _ui_run_quiet() {
 	if ((rc == 0)); then
 		printf '  %s✔ %s (%s)%s\n' "$C_DIM" "$label" "$(fmt_duration $(( $(date +%s) - t0 )))" "$C_RESET" >&2
 	else
-		error "Failed (exit $rc): $*"
+		error "Failed (exit $rc): $(masked "$*")"
 		error "Last lines of $FSS_LOG_FILE:"
 		tail -n 25 "$FSS_LOG_FILE" | sed 's/^/     /' >/dev/tty 2>/dev/null || tail -n 25 "$FSS_LOG_FILE" >&2
 	fi

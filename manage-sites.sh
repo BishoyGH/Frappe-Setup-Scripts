@@ -13,7 +13,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/apps.sh
 . "$SCRIPT_DIR/lib/apps.sh"
 strict_mode
-ui_parse_flags "$@"; set -- "${FSS_ARGS[@]}"
+FSS_ARGS="$*"
+ui_parse_flags "$@"; set -- "${FSS_REST_ARGS[@]}"
 
 if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
 	sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'
@@ -22,6 +23,7 @@ if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
 fi
 [[ -n "${1:-}" ]] && BENCH_PATH=$1
 
+setup_logging manage-sites
 ui_set_title "Frappe Setup Scripts · Site manager"
 header "Frappe site manager"
 is_root && die "Run this script as the user that owns the bench, not as root."
@@ -32,6 +34,7 @@ select_bench BENCH
 use_node_for_bench "$BENCH"
 PROD=0; bench_is_production "$BENCH" && PROD=1
 DB_ROOT_PW=${DB_ROOT_PASSWORD:-}
+mask_secret "$DB_ROOT_PW"
 ensure_bench_redis "$BENCH"
 
 # --------------------------------------------------------------------------

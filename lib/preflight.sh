@@ -198,7 +198,11 @@ preflight_checks() {
 		1) info "Warnings only; you can continue." ;;
 		2)
 			error "Some checks failed; the installation will probably not work."
-			ask_yes_no "Continue anyway?" n || return 1
+			if [[ "${FSS_SKIP_CHECKS:-0}" == 1 ]]; then
+				warn "FSS_SKIP_CHECKS=1: continuing anyway."
+			else
+				ask_yes_no "Continue anyway?" n || return 1
+			fi
 			;;
 	esac
 	return 0

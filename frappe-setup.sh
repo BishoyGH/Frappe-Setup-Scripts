@@ -8,7 +8,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/preflight.sh
 . "$SCRIPT_DIR/lib/preflight.sh"
 strict_mode
-ui_parse_flags "$@"; set -- "${FSS_ARGS[@]}"
+ui_parse_flags "$@"; set -- "${FSS_REST_ARGS[@]}"
 
 # check: only run the system checks and print the result.
 run_check() {

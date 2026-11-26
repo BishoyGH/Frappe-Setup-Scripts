@@ -36,16 +36,29 @@ header()  {
 	printf '\n%s%s\n %s\n%s%s\n' "${C_CYAN}${C_BOLD}" "$line" "$*" "$line" "${C_RESET}" >&2
 }
 
-# run: print the command, then execute it. Fails the script on error (set -e).
+# Secrets registered with mask_secret are replaced by **** wherever run() prints a command.
+_FSS_SECRETS=()
+mask_secret() { [[ -n "${1:-}" ]] && _FSS_SECRETS+=("$1"); return 0; }
+masked() {
+	local s=$* x
+	for x in "${_FSS_SECRETS[@]}"; do s=${s//"$x"/****}; done
+	printf '%s' "$s"
+}
+
+# run: print the command (secrets masked), then execute it. Fails the script on error (set -e).
 run() {
 	if ui_quiet_active; then _ui_run_quiet "$@"; return; fi
-	printf '%s$ %s%s\n' "${C_DIM}" "$*" "${C_RESET}" >&2
+	printf '%s$ %s%s\n' "${C_DIM}" "$(masked "$*")" "${C_RESET}" >&2
 	"$@"
 }
 
 # Exit hooks (several modules need cleanup; a single EXIT trap runs them all)
 _FSS_EXIT_HOOKS=()
-_fss_run_exit_hooks() { local h; for h in "${_FSS_EXIT_HOOKS[@]}"; do eval "$h" || true; done; }
+_fss_run_exit_hooks() {
+	local h
+	for h in "${_FSS_EXIT_HOOKS[@]}"; do eval "$h" || true; done
+	_fss_flush_log
+}
 on_exit() { _FSS_EXIT_HOOKS+=("$*"); trap _fss_run_exit_hooks EXIT; }
 
 # Standard strict mode + error report for the entry scripts.
@@ -121,6 +134,7 @@ ask_secret() {
 	local __var=$1 __prompt=$2 __confirm=${3:-yes} __envvar=${4:-} __a='' __b=''
 	if [[ -n "$__envvar" && -n "${!__envvar:-}" ]]; then
 		printf -v "$__var" '%s' "${!__envvar}"
+		mask_secret "${!__envvar}"
 		return 0
 	fi
 	if [[ "${ASSUME_DEFAULTS:-0}" == 1 ]]; then
@@ -140,6 +154,7 @@ ask_secret() {
 		fi
 		break
 	done
+	mask_secret "$__a"
 	printf -v "$__var" '%s' "$__a"
 }
 
@@ -343,7 +358,9 @@ service_enable_start() {
 	elif command -v service >/dev/null 2>&1 && [[ -e "/etc/init.d/$name" ]]; then
 		run as_root service "$name" start || true
 	elif (($#)); then
-		run as_root "$@"
+		# A daemon started here must not keep the script's output pipe (the log writer) open,
+		# or the script never finishes; give it the log file (or nothing) instead.
+		run as_root "$@" </dev/null >>"${FSS_LOG_FILE:-/dev/null}" 2>&1
 	else
 		warn "Cannot start '$name' automatically (no systemd). Start it manually."
 		return 1
@@ -557,15 +574,50 @@ with_bench() {
 	( cd "$bench" && run bench "$@" )
 }
 
+# --------------------------------------------------------------------------
+# Log files
+# setup_logging <name>: copy everything the script prints (not what you type) to
+# $FSS_LOG_DIR/<name>-<timestamp>.log, without colour codes. Keeps the newest 20 logs per name.
+# --------------------------------------------------------------------------
+FSS_LOG_DIR="${FSS_LOG_DIR:-$HOME/frappe-setup-logs}"
+_FSS_LOG_PID=''
 setup_logging() {
-	local name=$1 dir="$HOME/frappe-setup-logs"
-	mkdir -p "$dir"
-	FSS_LOG_FILE="$dir/$name-$(date +%Y%m%d-%H%M%S).log"
-	# Send stdout/stderr to both the terminal and the log (prompts read from /dev/tty).
-	exec > >(tee -a "$FSS_LOG_FILE") 2>&1
+	local name=$1 old
+	[[ -n "${FSS_LOG_FILE:-}" && -n "$_FSS_LOG_PID" ]] && return 0
+	if [[ ! -d "$FSS_LOG_DIR" ]]; then mkdir -p "$FSS_LOG_DIR" && chmod 700 "$FSS_LOG_DIR"; fi
+	# The PID keeps names unique when two runs share a directory in the same second
+	# (install.sh as root hands over to the bench user within a second).
+	FSS_LOG_FILE="$FSS_LOG_DIR/$name-$(date +%Y%m%d-%H%M%S)-$$.log"
+	( umask 077; : >"$FSS_LOG_FILE" )
+	# Prompts read from /dev/tty, so only output (never typed input) reaches the log.
+	exec > >(tee >(sed -u 's/\x1b\[[0-9;]*[A-Za-z]//g' >>"$FSS_LOG_FILE"); wait "$!" 2>/dev/null) 2>&1
+	_FSS_LOG_PID=$!
+	on_exit ':'  # make sure the EXIT trap (which flushes the log) is installed
+	# shellcheck disable=SC2012  # log names are ours: <name>-<digits>.log
+	while read -r old; do rm -f -- "$old"; done < <(ls -1t "$FSS_LOG_DIR/$name"-*.log 2>/dev/null | tail -n +21)
+	{
+		printf '# %s, started %s by %s on %s\n' "$name" "$(date '+%F %T %z')" "$(id -un)" "$(hostname 2>/dev/null || echo '?')"
+		printf '# scripts: %s\n' "$(git -C "${SCRIPT_DIR:-.}" describe --always --dirty 2>/dev/null || echo unknown)"
+		printf '# command: %s\n' "$(masked "$0 ${FSS_ARGS:-}")"
+	} >>"$FSS_LOG_FILE"
 	info "Logging to $FSS_LOG_FILE"
 	ui_quiet_active && info "Quiet mode: command output goes to the log only."
 	return 0
+}
+
+# Wait for the log writer so the last lines are not lost when the script exits.
+_fss_flush_log() {
+	[[ -n "$_FSS_LOG_PID" ]] || return 0
+	exec 1>&- 2>&-
+	# Normally the writer ends as soon as our output closes. If some background process
+	# still holds the pipe, do not hang: give it 5 seconds, then stop it.
+	local _
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		kill -0 "$_FSS_LOG_PID" 2>/dev/null || break
+		sleep 0.5
+	done
+	kill "$_FSS_LOG_PID" 2>/dev/null || true
+	_FSS_LOG_PID=''
 }
 
 # Dialog boxes, validation, progress and summary helpers.
