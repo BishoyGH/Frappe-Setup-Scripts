@@ -66,19 +66,21 @@ jobs:
           img='${{ matrix.image }}'
           echo "prefix=dl-${img//[:\/]/-}-" >>"$GITHUB_OUTPUT"
           echo "key=dl-${img//[:\/]/-}-$(date +%Y%m)-${{ hashFiles('lib/prereqs.sh', 'lib/apps.sh') }}" >>"$GITHUB_OUTPUT"
-          mkdir -p cache logs
+          mkdir -p "$RUNNER_TEMP/dl-cache" logs
+      # The cache lives outside the checkout: install.sh copies its own directory into the bench
+      # user's home on every run, so a cache inside /src would be copied three times per job.
       - name: Restore download cache
         id: cache
         if: env.USE_CACHE == 'true'
         uses: actions/cache/restore@v4
         with:
-          path: cache
+          path: ${{ runner.temp }}/dl-cache
           key: ${{ steps.key.outputs.key }}
           restore-keys: ${{ steps.key.outputs.prefix }}
       - name: Install in a fresh ${{ matrix.image }} container
         run: |
           cache_args=()
-          if [ "$USE_CACHE" = true ]; then cache_args=(-v "$PWD/cache:/cache" -e CI_CACHE=/cache); fi
+          if [ "$USE_CACHE" = true ]; then cache_args=(-v "$RUNNER_TEMP/dl-cache:/cache" -e CI_CACHE=/cache); fi
           docker run --rm --hostname ci-host \
             -e FRAPPE_BRANCH='${{ inputs.frappe_branch || 'latest' }}' \
             "${cache_args[@]}" \
@@ -89,11 +91,11 @@ jobs:
         # Saved by the development job only (the production job of the same distro reuses it),
         # and only after a passing install, so a broken run never poisons the cache.
         if: env.USE_CACHE == 'true' && matrix.mode == 'development' && steps.cache.outputs.cache-hit != 'true'
-        run: sudo chmod -R a+rX cache && sudo chown -R "$(id -u):$(id -g)" cache
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/dl-cache" && chmod -R u+rwX "$RUNNER_TEMP/dl-cache"
       - if: env.USE_CACHE == 'true' && matrix.mode == 'development' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: cache
+          path: ${{ runner.temp }}/dl-cache
           key: ${{ steps.key.outputs.key }}
       - name: Make logs readable
         if: always()
