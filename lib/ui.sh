@@ -530,12 +530,12 @@ ui_box() {
 	for line in "$@"; do plain=$(_ui_strip <<<"$line"); ((${#plain} > max)) && max=${#plain}; done
 	if _ui_has_tty; then _ui_size; cols=$_UI_COLS; fi
 	w=$((max + 4))
-	local right=1
-	((w + 2 > cols)) && right=0
+	local right=1 tr='╮' br='╯'
+	((w + 2 > cols)) && right=0 tr='' br=
 	local rule
 	rule=$(printf '%*s' $((w - ${#title} - 3)) '' | tr ' ' '#'); rule=${rule//#/─}
 	{
-		printf '\n%s╭─ %s%s%s %s%s%s\n' "${C_GREEN}" "${C_BOLD}" "$title" "${C_RESET}${C_GREEN}" "$rule" "$( ((right)) && printf '╮')" "${C_RESET}"
+		printf '\n%s╭─ %s%s%s %s%s%s\n' "${C_GREEN}" "${C_BOLD}" "$title" "${C_RESET}${C_GREEN}" "$rule" "$tr" "${C_RESET}"
 		for line in "$@"; do
 			plain=$(_ui_strip <<<"$line")
 			pad=$((w - 2 - ${#plain}))
@@ -546,7 +546,7 @@ ui_box() {
 			fi
 		done
 		rule=$(printf '%*s' "$w" '' | tr ' ' '#'); rule=${rule//#/─}
-		printf '%s╰%s%s%s\n' "${C_GREEN}" "$rule" "$( ((right)) && printf '╯')" "${C_RESET}"
+		printf '%s╰%s%s%s\n' "${C_GREEN}" "$rule" "$br" "${C_RESET}"
 	} >&2
 }
 

@@ -437,8 +437,9 @@ fi
 # 2. Summary
 # --------------------------------------------------------------------------
 header "Summary"
+WSL_NOTE=''; ((IS_WSL)) && WSL_NOTE=', WSL'
 summary=$(
-	printf '   %-18s %s\n' "System" "$OS_PRETTY ($ARCH$( ((IS_WSL)) && printf ', WSL'))"
+	printf '   %-18s %s\n' "System" "$OS_PRETTY ($ARCH${WSL_NOTE})"
 	printf '   %-18s %s\n' "Mode" "$MODE"
 	printf '   %-18s %s\n' "Frappe" "$FRAPPE_BRANCH"
 	printf '   %-18s %s\n' "Python / Node" "$PYTHON_VERSION / $NODE_VERSION"
@@ -646,7 +647,8 @@ if ((CREATE_SITE)); then
 	if [[ "$MODE" == development ]]; then
 		URLS+=("http://$SITE_NAME:8000")
 	else
-		URLS+=("http$( ((HTTPS_OK)) && printf s)://$SITE_NAME")
+		scheme=http; ((HTTPS_OK)) && scheme=https
+		URLS+=("$scheme://$SITE_NAME")
 		if ((!DNS_MULTITENANT)); then
 			for ip in $(hostname -I 2>/dev/null); do
 				[[ "$ip" == *:* ]] || URLS+=("http://$ip")
@@ -698,13 +700,15 @@ box+=("$(kv Update "$SCRIPT_DIR/update-bench.sh")")
 box+=("$(kv Log "$FSS_LOG_FILE")")
 ui_box "Frappe is ready  ·  $(fmt_duration "$ELAPSED")" "${box[@]}"
 
-if [[ -n "$CRED_FILE" ]]; then
+if [[ -n "$CRED_FILE" ]] && ! _ui_has_tty; then
+	warn "Generated passwords are saved in $CRED_FILE (only you can read it)."
+elif [[ -n "$CRED_FILE" ]]; then
 	{
 		printf '\n%s%s%s\n' "${C_YELLOW}${C_BOLD}" "Generated passwords (shown once, not written to the log):" "${C_RESET}"
 		for e in "${FSS_GENERATED_SECRETS[@]}"; do printf '   %-44s %s%s%s\n' "${e%%|*}" "${C_BOLD}" "${e#*|}" "${C_RESET}"; done
 		printf '   %sAlso saved in %s (only you can read it).%s\n' "${C_DIM}" "$CRED_FILE" "${C_RESET}"
 		printf '   %sStore them in a password manager, then delete that file.%s\n' "${C_DIM}" "${C_RESET}"
-	} >/dev/tty 2>/dev/null || warn "Generated passwords are saved in $CRED_FILE (only you can read it)."
+	} >/dev/tty
 	echo "   Generated passwords were shown on the terminal and saved in $CRED_FILE." >>"$FSS_LOG_FILE"
 fi
 success "Frappe is installed."
