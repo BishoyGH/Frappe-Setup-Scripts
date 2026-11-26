@@ -1,0 +1,14 @@
+# Same checks as CI, run locally on commit: `pipx install pre-commit && pre-commit install`
+repos:
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: [-x]
+  - repo: local
+    hooks:
+      - id: bash-syntax
+        name: bash -n
+        entry: bash -n
+        language: system
+        files: \.sh$

@@ -5,16 +5,23 @@ on:
   push:
     branches: [claude/project-thread-wrx4t9, main]
     paths: ["**.sh", ".github/workflows/shellcheck.yml"]
+  # Draft PRs don't run CI; mark ready for review, or add the "run-ci" label on a draft.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
     paths: ["**.sh", ".github/workflows/shellcheck.yml"]
   workflow_dispatch:
 
 concurrency:
-  group: shellcheck-${{ github.ref }}
+  # Labels other than run-ci get their own group, so labelling a PR doesn't cancel its CI.
+  group: shellcheck-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'run-ci' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   shellcheck:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'labeled' && !github.event.pull_request.draft) ||
+      (github.event.action == 'labeled' && github.event.label.name == 'run-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
