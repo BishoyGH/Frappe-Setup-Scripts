@@ -356,7 +356,9 @@ gen_password() { # gen_password [length]
 ask_new_password() {
 	local __np_var=$1 __np_label=$2 __np_env=${3:-} __np_min=${4:-1} __np_a='' __np_b=''
 	if [[ -n "$__np_env" && -n "${!__np_env:-}" ]]; then
-		printf -v "$__np_var" '%s' "${!__np_env}"; return 0
+		printf -v "$__np_var" '%s' "${!__np_env}"
+		mask_secret "${!__np_env}"
+		return 0
 	fi
 	if [[ "${ASSUME_DEFAULTS:-0}" == 1 ]]; then
 		ask_secret "$__np_var" "$__np_label" yes "$__np_env"; return 0
@@ -384,6 +386,7 @@ ask_new_password() {
 		[[ "$__np_a" == "$__np_b" ]] && break
 		ui_error "The two passwords do not match. Try again."
 	done
+	mask_secret "$__np_a"
 	printf -v "$__np_var" '%s' "$__np_a"
 }
 

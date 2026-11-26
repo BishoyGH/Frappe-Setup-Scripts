@@ -140,7 +140,7 @@ ask_secret() {
 	if [[ "${ASSUME_DEFAULTS:-0}" == 1 ]]; then
 		die "ASSUME_DEFAULTS is set but no value for '${__prompt}' was provided${__envvar:+ (set $__envvar)}."
 	fi
-	if tui_active; then _tui_secret "$__var" "$__prompt" "$__confirm"; return 0; fi
+	if tui_active; then _tui_secret "$__var" "$__prompt" "$__confirm"; mask_secret "${!__var}"; return 0; fi
 	while true; do
 		printf '%s?%s %s: ' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__prompt" >&2
 		_tty_read __a -s
