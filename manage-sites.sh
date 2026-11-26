@@ -3,7 +3,7 @@
 # list, create, migrate, back up, restore and remove sites; install/uninstall apps;
 # fetch new apps into the bench; set the default site; HTTPS for production benches.
 #
-# Usage: ./manage-sites.sh [bench-path]
+# Usage: ./manage-sites.sh [--plain] [--quiet] [bench-path]
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -13,13 +13,16 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/apps.sh
 . "$SCRIPT_DIR/lib/apps.sh"
 strict_mode
+ui_parse_flags "$@"; set -- "${FSS_ARGS[@]}"
 
 if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
 	sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'
+	echo; ui_flags_help
 	exit 0
 fi
 [[ -n "${1:-}" ]] && BENCH_PATH=$1
 
+ui_set_title "Frappe Setup Scripts · Site manager"
 header "Frappe site manager"
 is_root && die "Run this script as the user that owns the bench, not as root."
 detect_os
@@ -76,24 +79,23 @@ list_sites() {
 	local s def='' apps
 	[[ -f "$BENCH/sites/currentsite.txt" ]] && def=$(cat "$BENCH/sites/currentsite.txt")
 	def=${def:-$(grep -oE '"default_site"\s*:\s*"[^"]+"' "$BENCH/sites/common_site_config.json" 2>/dev/null | grep -oE '"[^"]+"$' | tr -d '"' || true)}
-	local any=0
+	local any=0 out=''
 	while read -r s; do
 		[[ -z "$s" ]] && continue
 		any=1
 		apps=$(site_installed_apps "$s" | tr '\n' ' ')
-		printf '   %s%-32s%s %s%s\n' "${C_BOLD}" "$s" "${C_RESET}" "${apps:-frappe only}" "$([[ "$s" == "$def" ]] && printf '  %s(default)%s' "$C_GREEN" "$C_RESET")" >&2
+		out+=$(printf '   %s%-32s%s %s%s' "${C_BOLD}" "$s" "${C_RESET}" "${apps:-frappe only}" "$([[ "$s" == "$def" ]] && printf '  %s(default)%s' "$C_GREEN" "$C_RESET")")$'\n'
 	done < <(bench_sites "$BENCH")
-	((any)) || echo "   (no sites)" >&2
+	((any)) || out="   (no sites)"
+	ui_details "${out%$'\n'}"
 }
 
 create_site() {
 	header "Create a site"
 	local site admin_pw def_name apps_opts=() apps=() a
 	if ((PROD)); then def_name=$(hostname -f 2>/dev/null || cat /etc/hostname 2>/dev/null || echo site1.local); else def_name="site$(( $(bench_sites "$BENCH" | wc -l) + 1 )).localhost"; fi
-	ask site "Site name" "$def_name"
-	[[ "$site" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { warn "Invalid site name."; return 1; }
-	[[ -d "$BENCH/sites/$site" ]] && { warn "Site $site already exists."; return 1; }
-	ask_secret admin_pw "Administrator password for $site" yes
+	ask_valid site "Site name" "$def_name" valid_site_name "$BENCH"
+	ask_new_password admin_pw "Administrator password for $site" "" "$( ((PROD)) && echo 8 || echo 4)"
 	get_db_root_pw
 	mapfile -t apps_opts < <(bench_apps "$BENCH" | grep -vx frappe || true)
 	if ((${#apps_opts[@]})); then
@@ -104,6 +106,10 @@ create_site() {
 	for a in "${apps[@]}"; do args+=(--install-app "$a"); done
 	b "${args[@]}"
 	check_site_apps "$BENCH" "$site" "${apps[@]}" || true
+	local gen
+	if gen=$(generated_secret "Administrator password for $site"); then
+		printf '\n   %sAdministrator password for %s:%s %s%s%s  (shown once, not logged)\n\n' "${C_YELLOW}${C_BOLD}" "$site" "${C_RESET}" "${C_BOLD}" "$gen" "${C_RESET}" >/dev/tty 2>/dev/null || true
+	fi
 	if ((!PROD)); then
 		grep -q '"developer_mode"\s*:\s*1' "$BENCH/sites/common_site_config.json" 2>/dev/null && b --site "$site" set-config developer_mode 1
 		[[ "$site" == *.localhost ]] || { ask_yes_no "Add $site to /etc/hosts?" y && b --site "$site" add-to-hosts; }
@@ -161,7 +167,7 @@ get_new_app() {
 	opts+=("custom|Another app from a git URL")
 	choose src "Which app?" 1 "${opts[@]}"
 	if [[ "$src" == custom ]]; then
-		ask url "Git URL of the app"
+		ask_valid url "Git URL of the app" "" valid_git_url
 		app=$(basename "${url%.git}")
 		ask branch "Branch or tag" "$(pick_app_branch "$url" "$target" || echo main)"
 		b get-app --branch "$branch" "$url"
@@ -272,6 +278,7 @@ set_default_site() {
 toggle_developer_mode() {
 	local site cur
 	pick_site site || return 0
+	# shellcheck disable=SC2015
 	cur=$(cd "$BENCH" && bench --site "$site" show-config -f json 2>/dev/null | grep -oE '"developer_mode"\s*:\s*[01]' | grep -oE '[01]$' || true)
 	if [[ "$cur" == 1 ]]; then
 		ask_yes_no "Developer mode is ON for $site. Turn it off?" y && b --site "$site" set-config developer_mode 0
@@ -331,7 +338,7 @@ while true; do
 	# Each action runs in a subshell so a failed bench command returns to the menu.
 	case "$ACTION" in
 		quit) break ;;
-		list) ( list_sites ) || true ;;
+		list) list_sites ;;
 		create) ( create_site ) || warn "Site creation did not finish." ;;
 		install-app) ( install_app_on_site ) || warn "App install did not finish." ;;
 		uninstall-app) ( uninstall_app_from_site ) || warn "Uninstall did not finish." ;;
@@ -345,5 +352,9 @@ while true; do
 		https) ( setup_https ) || warn "HTTPS setup did not finish." ;;
 	esac
 	[[ "${ASSUME_DEFAULTS:-0}" == 1 ]] && break
+	# Dialog boxes would hide the action's output; let the user read it first.
+	if tui_active && [[ "$ACTION" != list ]]; then pause; fi
+	# In dialog mode the menu shows the current sites at the top.
+	if tui_active && [[ "$ACTION" != list ]]; then list_sites 2>/dev/null; fi
 done
 success "Bye."
