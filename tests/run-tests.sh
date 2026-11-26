@@ -2,7 +2,7 @@
 # Offline tests for the helper functions in lib/. No network, no root, no Frappe needed.
 # Usage: tests/run-tests.sh
 
-# shellcheck disable=SC2015,SC2012,SC2116,SC2329  # test idioms: "cond && ok || bad"
+# shellcheck disable=SC2015,SC2012,SC2016,SC2116,SC2329  # test idioms: "cond && ok || bad"
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP=$(mktemp -d)
@@ -174,9 +174,22 @@ grep -q $'\e' "$log" && bad "colour codes in the log" || ok
 grep -qx 'red' "$log" && ok || bad "colour stripped text present"
 eq 600 "$(stat -c %a "$log")" "log is private"
 [[ "$out" == *"LAST LINE"* ]] && ok || bad "terminal output kept"
-for i in $(seq 1 25); do touch -d "-$i minutes" "$FSS_LOG_DIR/unit-2000010${i}-000000.log"; done
+for i in $(seq 1 25); do touch -d "-$i minutes" "$FSS_LOG_DIR/unit-2000010${i}-000000-1.log"; done
 bash -c '. "$1/lib/common.sh"; setup_logging unit' _ "$ROOT" >/dev/null 2>&1
 eq 20 "$(find "$FSS_LOG_DIR" -name 'unit-*.log' | wc -l | tr -d ' ')" "keeps the newest 20 logs"
+
+t "log writer does not hang on a leftover background process"
+start=$(date +%s)
+timeout 30 bash -c '
+	. "$1/lib/common.sh"
+	setup_logging hang
+	sleep 60 &   # like a daemon that inherited stdout
+	echo "BEFORE EXIT"
+' _ "$ROOT" >/dev/null 2>&1
+eq 0 "$?" "script exits (not killed by timeout)"
+(( $(date +%s) - start < 20 )) && ok || bad "took $(( $(date +%s) - start ))s"
+grep -q 'BEFORE EXIT' "$(ls -t "$FSS_LOG_DIR"/hang-*.log | head -1)" && ok || bad "output before exit is in the log"
+pkill -f 'sleep 60' 2>/dev/null || true
 
 t "install.sh argument handling"
 fails bash "$ROOT/install.sh" --bogus

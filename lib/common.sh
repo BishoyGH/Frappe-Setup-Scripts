@@ -341,7 +341,9 @@ service_enable_start() {
 	elif command -v service >/dev/null 2>&1 && [[ -e "/etc/init.d/$name" ]]; then
 		run as_root service "$name" start || true
 	elif (($#)); then
-		run as_root "$@"
+		# A daemon started here must not keep the script's output pipe (the log writer) open,
+		# or the script never finishes; give it the log file (or nothing) instead.
+		run as_root "$@" </dev/null >>"${FSS_LOG_FILE:-/dev/null}" 2>&1
 	else
 		warn "Cannot start '$name' automatically (no systemd). Start it manually."
 		return 1
@@ -566,7 +568,9 @@ setup_logging() {
 	local name=$1 old
 	[[ -n "${FSS_LOG_FILE:-}" && -n "$_FSS_LOG_PID" ]] && return 0
 	if [[ ! -d "$FSS_LOG_DIR" ]]; then mkdir -p "$FSS_LOG_DIR" && chmod 700 "$FSS_LOG_DIR"; fi
-	FSS_LOG_FILE="$FSS_LOG_DIR/$name-$(date +%Y%m%d-%H%M%S).log"
+	# The PID keeps names unique when two runs share a directory in the same second
+	# (install.sh as root hands over to the bench user within a second).
+	FSS_LOG_FILE="$FSS_LOG_DIR/$name-$(date +%Y%m%d-%H%M%S)-$$.log"
 	( umask 077; : >"$FSS_LOG_FILE" )
 	# Prompts read from /dev/tty, so only output (never typed input) reaches the log.
 	exec > >(tee >(sed -u 's/\x1b\[[0-9;]*[A-Za-z]//g' >>"$FSS_LOG_FILE"); wait "$!" 2>/dev/null) 2>&1
@@ -586,6 +590,13 @@ setup_logging() {
 _fss_flush_log() {
 	[[ -n "$_FSS_LOG_PID" ]] || return 0
 	exec 1>&- 2>&-
-	wait "$_FSS_LOG_PID" 2>/dev/null || true
+	# Normally the writer ends as soon as our output closes. If some background process
+	# still holds the pipe, do not hang: give it 5 seconds, then stop it.
+	local _
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		kill -0 "$_FSS_LOG_PID" 2>/dev/null || break
+		sleep 0.5
+	done
+	kill "$_FSS_LOG_PID" 2>/dev/null || true
 	_FSS_LOG_PID=''
 }
