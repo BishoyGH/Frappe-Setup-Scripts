@@ -81,7 +81,7 @@ ops() { sudo -u frappe -H env ASSUME_DEFAULTS=1 NO_COLOR=1 FSS_LOG_DIR="$FSS_LOG
 ops backup --no-offsite
 ls /home/frappe/frappe-backups/ci-bench/"$SITE"/*-database.sql.gz >/dev/null || { echo "ops.sh backup wrote no database dump" >&2; exit 1; }
 ops restore --site "$SITE" --yes
-rc=0; ops status | tee /tmp/status.log || rc=$?
+rc=0; ops status 2>&1 | tee /tmp/status.log || rc=$?
 echo "status exit code: $rc"
 ((rc <= 2)) || { echo "ops.sh status crashed" >&2; exit 1; }
 if [[ "$MODE" == production ]]; then
