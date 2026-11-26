@@ -62,10 +62,14 @@ jobs:
         id: key
         run: |
           # One cache per distro, shared by its development and production jobs, renewed monthly
-          # and whenever the package lists change.
-          img='${{ matrix.image }}'
-          echo "prefix=dl-${img//[:\/]/-}-" >>"$GITHUB_OUTPUT"
-          echo "key=dl-${img//[:\/]/-}-$(date +%Y%m)-${{ hashFiles('lib/prereqs.sh', 'lib/apps.sh') }}" >>"$GITHUB_OUTPUT"
+          # and whenever the package lists change. Jobs with extra apps (ERPNext) keep their own,
+          # since their node/python packages are not in the plain Frappe cache.
+          img='${{ matrix.image }}'; apps='${{ matrix.apps }}'
+          base="dl-${img//[:\/]/-}-"
+          name="$base${apps:+${apps//,/-}-}"
+          echo "prefix=$name" >>"$GITHUB_OUTPUT"
+          echo "fallback=$base" >>"$GITHUB_OUTPUT"
+          echo "key=$name$(date +%Y%m)-${{ hashFiles('lib/prereqs.sh', 'lib/apps.sh') }}" >>"$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/dl-cache" logs
       # The cache lives outside the checkout: install.sh copies its own directory into the bench
       # user's home on every run, so a cache inside /src would be copied three times per job.
@@ -76,23 +80,28 @@ jobs:
         with:
           path: ${{ runner.temp }}/dl-cache
           key: ${{ steps.key.outputs.key }}
-          restore-keys: ${{ steps.key.outputs.prefix }}
+          restore-keys: |
+            ${{ steps.key.outputs.prefix }}
+            ${{ steps.key.outputs.fallback }}
       - name: Install in a fresh ${{ matrix.image }} container
+        # MariaDB's data directory is a RAM disk: creating a site runs hundreds of CREATE TABLEs, each
+        # waiting on fsync. Durability doesn't matter in a throwaway container; the SQL is the same.
         run: |
           cache_args=()
           if [ "$USE_CACHE" = true ]; then cache_args=(-v "$RUNNER_TEMP/dl-cache:/cache" -e CI_CACHE=/cache); fi
           docker run --rm --hostname ci-host \
             -e FRAPPE_BRANCH='${{ inputs.frappe_branch || 'latest' }}' \
             "${cache_args[@]}" \
+            --tmpfs /var/lib/mysql:rw,size=6g \
             -v "$PWD:/src:ro" -v "$PWD/logs:/logs" \
             '${{ matrix.image }}' \
             bash /src/tests/container-install.sh '${{ matrix.mode }}' '${{ matrix.apps }}'
       - name: Save download cache
-        # Saved by the development job only (the production job of the same distro reuses it),
-        # and only after a passing install, so a broken run never poisons the cache.
-        if: env.USE_CACHE == 'true' && matrix.mode == 'development' && steps.cache.outputs.cache-hit != 'true'
+        # Saved by the development job (the production job of the same distro reuses it) and by
+        # jobs with extra apps, only after a passing install, so a broken run never poisons the cache.
+        if: env.USE_CACHE == 'true' && (matrix.mode == 'development' || matrix.apps) && steps.cache.outputs.cache-hit != 'true'
         run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/dl-cache" && chmod -R u+rwX "$RUNNER_TEMP/dl-cache"
-      - if: env.USE_CACHE == 'true' && matrix.mode == 'development' && steps.cache.outputs.cache-hit != 'true'
+      - if: env.USE_CACHE == 'true' && (matrix.mode == 'development' || matrix.apps) && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/dl-cache
