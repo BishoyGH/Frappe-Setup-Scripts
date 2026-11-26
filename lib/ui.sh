@@ -583,7 +583,7 @@ _ui_run_quiet() {
 					last=${last:0:lw}
 				fi
 				printf '\r\e[K  %s%s%s %s %s%s%s %s' "$C_CYAN" "${frames:i % ${#frames}:1}" "$C_RESET" "$label" \
-					"$C_DIM" "$(fmt_duration $(( $(date +%s) - t0 )))" "$C_RESET" "$last" >/dev/tty
+					"$C_DIM" "$(fmt_duration $(( $(date +%s) - t0 )))" "$C_RESET" "$last" 2>/dev/null >/dev/tty || break  # terminal closed
 				i=$((i + 1))
 				sleep 0.25
 			done

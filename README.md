@@ -81,7 +81,10 @@ All questions come first, so once you confirm the summary the install runs witho
 1. **Setup type**: development (`bench start`, developer mode) or production (nginx + supervisor).
 2. **System check**: memory and swap, CPU, free disk (home and `/var/lib` for MariaDB), whether the ports
    are free (8000, 9000, 11000, 13000 in development; 80 and 443 in production), whether GitHub, PyPI and
-   npm can be reached, WSL 1 vs 2, and systemd. Failed checks ask whether to go on (unattended runs warn and continue; `FSS_STRICT_CHECKS=1` makes them stop, `FSS_SKIP_CHECKS=1` never stops). Resumed installs skip the check. On a small machine
+   npm can be reached, WSL 1 vs 2, and systemd. On WSL it also checks the free space of the Windows
+   drive that holds WSL's virtual disk, that the bench is not on a Windows drive, and whether
+   `.wslconfig` limits WSL's memory (see [WSL](#wsl)). Failed checks ask whether to go on (unattended runs warn and continue; `FSS_STRICT_CHECKS=1` makes them stop, `FSS_SKIP_CHECKS=1` never stops), except
+   too little disk space, which stops unattended runs too. Resumed installs check only memory and disk. On a small machine
    without swap it offers to create a 4 GB swap file so asset builds do not run out of memory.
 3. **Frappe version**: the newest release branches are read live from GitHub (e.g. `version-16`,
    `version-15`, `version-14`), plus `develop` or any custom branch/tag such as `v15.50.0`.
@@ -339,9 +342,70 @@ lib/prereqs.sh      packages, MariaDB, wkhtmltopdf, uv/Python, nvm/Node, bench, 
 lib/apps.sh         official app catalog, dependencies, branch matching
 lib/ops.sh          backup sets, offsite (rclone), restore points and rollback, health checks, cron
 lib/unattended.sh   preset answers (flags / answers file) and resumable steps
+lib/resources.sh    disk/memory watchdog, Windows drive checks and other WSL helpers
 examples/           sample answers file for unattended installs
 tests/              unit tests and the container install test used by CI
 ```
+
+## Safety limits
+
+While `install.sh`, `update-bench.sh` and `manage-sites.sh` run, a watchdog checks every 5 seconds:
+
+| Limit | Default | Stops the run when |
+| --- | --- | --- |
+| `FSS_MIN_FREE_MB` | 2048 | free disk space in the home directory, or on WSL on the Windows drive, drops below it |
+| `FSS_MIN_MEM_MB` | 150 | free memory plus free swap stays below it for 15 seconds |
+| `FSS_LOG_MAX_MB` | 500 | the run's log grows past it (a command printing the same thing over and over) |
+
+It stops the running command, explains what happened and how to free space, and exits; run the same
+command again afterwards and finished steps are skipped. Every minute it also writes a
+`# resources ...` line (free disk, memory, swap) to the log, so a log shows how resources changed step
+by step. `FSS_GUARD=0` turns the watchdog off.
+
+## WSL
+
+WSL 2 keeps a distro's files in a virtual disk (`ext4.vhdx`) on a Windows drive, usually C:. The file
+grows as WSL writes and does not shrink by itself when files are deleted, and inside WSL `df` shows the
+virtual disk's maximum size (often 1 TB) instead of the space left on C:. A Frappe bench with ERPNext
+needs about 5 to 10 GB while it is installed (packages, node_modules, Python env, download caches, the
+database). WSL also uses up to half of Windows' memory by default, and the Linux file cache fills that
+up during big downloads and builds. So on WSL the scripts:
+
+- check the free space of the Windows drive that holds the virtual disk (found through `reg.exe`,
+  C: if Windows cannot be asked), both before the install and during it (see [Safety limits](#safety-limits))
+- refuse to put a bench on a Windows drive (`/mnt/c/...`): keep benches in the Linux home (`/home/<user>`)
+- remove Windows folders (`/mnt/c/...`) from `PATH` for the run, so Windows' node, npm or yarn are never
+  used and command lookups stay fast
+- hand the Linux file cache back to Windows after every install step
+- remove the download caches at the end of the install (yarn, uv, npm, pip, apt/pacman), which frees
+  a few GB inside WSL (`FSS_CLEAN_CACHES=0` keeps them; `FSS_CLEAN_CACHES=1` cleans on other systems too)
+- offer to create `%UserProfile%\.wslconfig` when there is none:
+
+  ```ini
+  [wsl2]
+  # Most memory WSL may use (the installer picks 4 to 6 GB); Windows keeps the rest.
+  memory=6GB
+  swap=4GB
+
+  [experimental]
+  # Give memory WSL no longer needs (file cache) back to Windows.
+  autoMemoryReclaim=gradual
+  # Let new virtual disks shrink when files are deleted.
+  sparseVhd=true
+  ```
+
+  An existing `.wslconfig` is never changed; the installer shows the settings to add instead. The file
+  applies after `wsl --shutdown` (in PowerShell), so the installer offers to stop there first.
+
+To give space that WSL no longer uses back to Windows, run in PowerShell (a recent WSL; `wsl --update` updates it):
+
+```powershell
+wsl --shutdown
+wsl --manage <distro> --set-sparse true   # once; the disk then shrinks as files are deleted
+```
+
+Older WSL versions can compact the disk with `Optimize-VHD` (Hyper-V) or `diskpart`'s `compact vdisk`.
+`wsl -l -v` lists the distro names.
 
 ## Troubleshooting
 
@@ -349,7 +413,9 @@ tests/              unit tests and the container install test used by CI
 | --- | --- |
 | Dialog boxes look broken or keys do not work | run with `--plain` |
 | A step failed | the error names the step and the log file; with `--quiet` the last lines of output are shown. Fix the cause and run the script again |
-| `bench build` is killed / runs out of memory | add swap (the installer offers it when RAM < 4 GB) or more RAM |
+| `bench build` is killed / runs out of memory | add swap (the installer offers it when RAM < 4 GB) or more RAM; on WSL set `memory` and `swap` in `.wslconfig` (see [WSL](#wsl)) |
+| "Safety stop" | the disk (on WSL the Windows drive) or memory ran low, or a command printed endlessly; the message says which. Free space, then run the same command again (see [Safety limits](#safety-limits)) |
+| WSL filled C: | see [WSL](#wsl): clean caches, then `wsl --manage <distro> --set-sparse true` |
 | `bench start` says a port is in use | another bench or service uses 8000/9000/11000/13000; `./frappe-setup.sh check` shows which |
 | Let's Encrypt fails | the domain must resolve to this server and ports 80/443 must be open; retry from `manage-sites.sh` → https |
 

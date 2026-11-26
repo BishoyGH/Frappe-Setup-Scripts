@@ -624,3 +624,6 @@ _fss_flush_log() {
 # Dialog boxes, validation, progress and summary helpers.
 # shellcheck source=lib/ui.sh
 . "$(dirname "${BASH_SOURCE[0]}")/ui.sh"
+# Disk/memory watchdog and WSL helpers.
+# shellcheck source=lib/resources.sh
+. "$(dirname "${BASH_SOURCE[0]}")/resources.sh"

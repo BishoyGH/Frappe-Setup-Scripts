@@ -165,17 +165,19 @@ install_mariadb_server() {
 			;;
 	esac
 
-	local conf
+	local conf pool=256M
+	# Leave room for the builds on small machines.
+	(($(res_meminfo_mb MemTotal) < 3000)) && pool=128M
 	conf=$(mariadb_conf_path)
 	run as_root mkdir -p "$(dirname "$conf")"
-	as_root tee "$conf" >/dev/null <<'EOF'
+	as_root tee "$conf" >/dev/null <<EOF
 # Added by Frappe-Setup-Scripts: settings required by the Frappe framework.
 [mysqld]
 character-set-server = utf8mb4
 collation-server = utf8mb4_unicode_ci
 loose-character-set-client-handshake = FALSE
 innodb-file-per-table = 1
-innodb-buffer-pool-size = 256M
+innodb-buffer-pool-size = $pool
 innodb-log-buffer-size = 16M
 max_allowed_packet = 256M
 
@@ -508,6 +510,28 @@ reload_production() {
 	as_root supervisorctl reread >/dev/null 2>&1 || true
 	as_root supervisorctl update >/dev/null 2>&1 || true
 	( cd "$bench" && run bench restart ) || as_root supervisorctl restart all || true
+}
+
+# clean_download_caches: remove download caches that are only needed to install things again.
+clean_download_caches() {
+	local before after
+	header "Cleaning up download caches"
+	before=$(res_free_mb "$HOME")
+	load_runtime_env
+	if command -v yarn >/dev/null 2>&1; then run yarn cache clean >/dev/null || warn "yarn cache clean failed."; fi
+	if command -v uv >/dev/null 2>&1; then run uv cache prune || warn "uv cache prune failed."; fi
+	if command -v npm >/dev/null 2>&1; then run npm cache clean --force >/dev/null 2>&1 || true; fi
+	rm -rf "$HOME/.cache/pip"
+	case "$OS_FAMILY" in
+		debian) run as_root apt-get clean || true ;;
+		arch) run as_root pacman -Sc --noconfirm >/dev/null || true ;;
+	esac
+	after=$(res_free_mb "$HOME")
+	success "Freed $(res_gb $((after > before ? after - before : 0))) (caches are filled again when needed)."
+	if ((IS_WSL)); then
+		info "WSL's virtual disk does not shrink by itself. To give the space back to Windows, run in PowerShell:"
+		info "  wsl --shutdown; wsl --manage ${WSL_DISTRO_NAME:-<distro>} --set-sparse true"
+	fi
 }
 
 # WSL: offer to enable systemd so services start automatically.

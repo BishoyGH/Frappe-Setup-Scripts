@@ -344,6 +344,74 @@ t "ops.sh argument handling"
 fails bash "$ROOT/ops.sh" bogus
 bash "$ROOT/ops.sh" --help | grep -q 'rollback' && ok || bad "--help lists commands"
 
+t "WSL drive mounts"
+cat >"$TMP/mounts" <<'MOUNTS'
+none /mnt/wsl tmpfs rw,relatime 0 0
+C:\134 /mnt/c 9p rw,noatime,dirsync,aname=drvfs;path=C:\;uid=1000;gid=1000;symlinkroot=/mnt/ 0 0
+drvfs /mnt/d 9p rw,noatime,aname=drvfs;path=D:\;uid=1000 0 0
+/dev/sdc / ext4 rw,relatime 0 0
+MOUNTS
+eq "c /mnt/c|d /mnt/d" "$(wsl_drive_mounts "$TMP/mounts" | paste -sd'|')"
+
+t "WSL virtual disk location"
+lxss=$'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\r\n    DefaultDistribution    REG_SZ    {a}\r\n\r\n'
+lxss+=$'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{a}\r\n    BasePath    REG_SZ    C:\\Users\\Me\\AppData\\Local\\Packages\\Ubuntu\\LocalState\r\n    DistributionName    REG_SZ    Ubuntu\r\n\r\n'
+lxss+=$'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\{b}\r\n    DistributionName    REG_SZ    Debian Test\r\n    BasePath    REG_SZ    \\\\?\\E:\\WSL\\Debian\r\n'
+eq 'C:\Users\Me\AppData\Local\Packages\Ubuntu\LocalState' "$(wsl_lxss_base_path Ubuntu <<<"$lxss")"
+eq '\\?\E:\WSL\Debian' "$(wsl_lxss_base_path 'Debian Test' <<<"$lxss")" "last key, name with a space"
+eq '' "$(wsl_lxss_base_path Arch <<<"$lxss")" "unknown distro"
+
+t "WSL PATH and .wslconfig"
+( IS_WSL=1 PATH="/usr/bin:/mnt/c/Windows/system32:/home/u/.local/bin:/mnt/c/Program Files/nodejs:/mnt/data/bin:/bin"
+  wsl_strip_windows_path; eq "/usr/bin:/home/u/.local/bin:/mnt/data/bin:/bin" "$PATH" )
+( IS_WSL=0 PATH="/usr/bin:/mnt/c/x"; wsl_strip_windows_path; eq "/usr/bin:/mnt/c/x" "$PATH" "not WSL: unchanged" )
+( res_meminfo_mb() { echo 16000; }; wslconfig_recommended | grep -qx 'memory=6GB' && ok || bad "memory capped at 6 GB" )
+( res_meminfo_mb() { echo 3900; }; wslconfig_recommended | grep -qx 'memory=4GB' && ok || bad "memory at least 4 GB" )
+printf '[wsl2]\n# memory=2GB\nswap=0\n' >"$TMP/wslconfig"
+wslconfig_has "$TMP/wslconfig" memory && bad "commented key counts" || ok
+printf '[wsl2]\r\nMemory = 4GB\r\n' >"$TMP/wslconfig"
+wslconfig_has "$TMP/wslconfig" memory && ok || bad "key with spaces and CRLF"
+
+t "resource helpers"
+[[ "$(res_free_mb "$TMP/does/not/exist")" =~ ^[0-9]+$ ]] && ok || bad "free space of a missing path"
+[[ "$(res_meminfo_mb MemTotal)" =~ ^[1-9][0-9]*$ ]] && ok || bad "MemTotal"
+eq 0 "$(res_meminfo_mb NoSuchKey)"
+( IS_WSL=0; res_disk_problem "$TMP" 1 >/dev/null && bad "plenty of space" || ok
+  msg=$(res_disk_problem "$TMP" 999999999) && [[ "$msg" == "only "* ]] && ok || bad "low space: $msg" )
+sleep 30 & sl=$!
+( sleep 31 ) & sub=$!
+desc=" $(res_descendants $$ "$sub" | tr '\n' ' ') "
+[[ "$desc" == *" $sl "* ]] && ok || bad "child listed"
+[[ "$desc" != *" $sub "* ]] && ok || bad "excluded child skipped"
+pkill -P "$sub" 2>/dev/null; kill "$sl" "$sub" 2>/dev/null; wait 2>/dev/null
+
+t "resource guard stops a run"
+guarded() { # guarded <name> <guard env...> -- <command...>: a small script that runs <command> under the guard
+	local name=$1; shift
+	local -a env=()
+	while [[ "$1" != -- ]]; do env+=("$1"); shift; done; shift
+	{
+		printf '. %q\nstrict_mode\nsetup_logging %q\nIS_WSL=0\n' "$ROOT/lib/common.sh" "$name"
+		printf '%s ' FSS_GUARD_INTERVAL=1 "${env[@]}"; printf 'resource_guard_start %q\n' "$TMP"
+		printf '%s\necho "after"\n' "$*"
+	} >"$TMP/$name.sh"
+	bash "$TMP/$name.sh" 2>&1
+}
+start=$(date +%s)
+out=$(guarded g1 FSS_MIN_FREE_MB=999999999 -- run sleep 60); rc=$?
+eq 143 "$rc" "exit status"
+(( $(date +%s) - start < 20 )) && ok || bad "stopped quickly"
+[[ "$out" == *"Safety stop. Disk almost full"* && "$out" == *"Stopped by the safety check"* ]] && ok || bad "explains the stop: $out"
+[[ "$out" != *after* ]] && ok || bad "script did not continue"
+grep -q '^# resources' "$FSS_LOG_DIR"/g1-*.log && ok || bad "resource snapshot in the log"
+out=$(guarded g2 FSS_LOG_MAX_MB=1 -- run yes | tail -c 2000)
+[[ "$out" == *"The log grew past 1 MB"* ]] && ok || bad "endless output stopped"
+out=$(guarded g3 FSS_MIN_FREE_MB=999999999 -- 'while :; do :; done')
+[[ "$out" == *"Stopped by the safety check"* ]] && ok || bad "busy script stopped"
+out=$(guarded g4 -- echo fine); rc=$?
+eq 0 "$rc" "a normal run is not affected"
+[[ "$out" == *fine*after* && "$out" != *Safety* ]] && ok || bad "normal output: $out"
+
 # --------------------------------------------------------------------------
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 ((FAIL == 0))

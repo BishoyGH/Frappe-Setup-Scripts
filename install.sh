@@ -112,6 +112,7 @@ setup_logging install
 ui_set_title "Frappe Setup Scripts · Installer"
 header "Frappe installer"
 require_supported_os
+wsl_strip_windows_path
 [[ "${ASSUME_DEFAULTS:-0}" == 1 ]] && info "Unattended mode: questions without a preset answer use their default."
 
 # --------------------------------------------------------------------------
@@ -172,12 +173,14 @@ if is_root; then
 	# Leave a working directory the new user may not be able to read (e.g. /root).
 	cd "$user_home"
 	sudo -u "$FRAPPE_USER" -H \
-		--preserve-env=ASSUME_DEFAULTS,DB_ROOT_PASSWORD,ADMIN_PASSWORD,NO_COLOR,FSS_LOG_DIR,FSS_FAIL_AFTER_STEP,FSS_UI,FSS_QUIET,TERM \
+		--preserve-env=ASSUME_DEFAULTS,DB_ROOT_PASSWORD,ADMIN_PASSWORD,NO_COLOR,FSS_LOG_DIR,FSS_FAIL_AFTER_STEP,FSS_UI,FSS_QUIET,TERM,WSL_DISTRO_NAME,FSS_SKIP_CHECKS,FSS_STRICT_CHECKS,FSS_GUARD,FSS_MIN_FREE_MB,FSS_MIN_MEM_MB,FSS_LOG_MAX_MB,FSS_CLEAN_CACHES \
 		bash "$dest/install.sh" "${child_args[@]}" || rc=$?
 	exit "$rc"
 fi
 
 ensure_sudo
+# Stop cleanly before the disk (on WSL also the Windows drive) fills up or memory runs out.
+resource_guard_start "$HOME"
 if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
 	info "Installing git and curl first (needed to look up app versions)."
 	bootstrap_root_minimum
@@ -238,9 +241,17 @@ fi
 header "2/6  System check"
 CREATE_SWAP=0
 if ((RESUMING)); then
-	info "Resuming an earlier install; skipping the system check."
+	info "Resuming an earlier install; checking only memory and free disk space."
+	preflight_checks "$MODE" "$HOME" quick || die "Stopped after the system check."
 else
 	preflight_checks "$MODE" "$HOME" || die "Stopped after the system check."
+	if wsl_offer_wslconfig; then
+		if ask_yes_no "The limits apply after WSL restarts. Stop now, so you can run 'wsl --shutdown' in PowerShell and start the installer again?" y; then
+			info "Run 'wsl --shutdown' in PowerShell (or cmd), reopen this distro, then run the same command again."
+			exit 0
+		fi
+		warn "Continuing without the new limits; they apply after the next 'wsl --shutdown'."
+	fi
 fi
 if ((!RESUMING)) && [[ "${ASSUME_DEFAULTS:-0}" != 1 ]] && swap_recommended; then
 	ask_yes_no "This machine has little memory and no swap. Create a 4 GB swap file (/swapfile) so builds do not run out of memory?" y && CREATE_SWAP=1
@@ -652,11 +663,16 @@ PLAN+=("Building assets|do_build")
 ((CREATE_SITE)) && PLAN+=("Site $SITE_NAME|do_site")
 [[ "$MODE" == production ]] && PLAN+=("Production (nginx + supervisor)|do_production")
 ((LETSENCRYPT)) && PLAN+=("HTTPS for $SITE_NAME|do_https")
+# Download caches (yarn, uv, npm, packages) take several GB. On WSL that space is taken from the
+# Windows drive for good, so they are removed by default there (FSS_CLEAN_CACHES=0 keeps them).
+if [[ "${FSS_CLEAN_CACHES:-$IS_WSL}" == 1 ]]; then PLAN+=("Clean up download caches|clean_download_caches"); fi
 
 phase_plan "${#PLAN[@]}"
 for entry in "${PLAN[@]}"; do
 	read -ra cmd <<<"${entry#*|}"
 	phase "${entry%%|*}" "${cmd[@]}"
+	# WSL: hand the file cache of the step back to Windows instead of letting it pile up.
+	wsl_drop_caches
 done
 
 wsl_offer_systemd

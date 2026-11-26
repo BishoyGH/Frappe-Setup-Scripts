@@ -28,9 +28,11 @@ ui_set_title "Frappe Setup Scripts · Site manager"
 header "Frappe site manager"
 is_root && die "Run this script as the user that owns the bench, not as root."
 detect_os
+wsl_strip_windows_path
 load_runtime_env
 command -v bench >/dev/null 2>&1 || die "bench is not installed for $(id -un). Run ./install.sh first."
 select_bench BENCH
+resource_guard_start "$BENCH"
 use_node_for_bench "$BENCH"
 PROD=0; bench_is_production "$BENCH" && PROD=1
 DB_ROOT_PW=${DB_ROOT_PASSWORD:-}
