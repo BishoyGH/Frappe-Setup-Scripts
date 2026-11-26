@@ -92,6 +92,85 @@ mask_secret ''
 eq "new-site x --admin-password ****" "$(masked new-site x --admin-password 'p@ss w0rd')"
 eq "\$ echo --db-root-password ****" "$(run echo --db-root-password 'p@ss w0rd' 2>&1 >/dev/null)"
 
+t "password_problem"
+password_problem "abcd" 4 >/dev/null && ok || bad "4 chars, min 4"
+eq "Use at least 8 characters." "$(password_problem short 8)"
+fails password_problem " leading-space" 1
+fails password_problem "trailing-space " 1
+fails password_problem $'tab\there' 1
+password_problem "p@ss w0rd with spaces" 8 >/dev/null && ok || bad "inner spaces allowed"
+
+t "password_weakness"
+for w in password Password123! admin admin2024 frappe aaaaaaaaaaaa 12345678 987654 abcdefgh qwertyuiop changeme; do
+	password_weakness "$w" >/dev/null && bad "'$w' should be weak" || ok
+done
+eq "it is shorter than 12 characters" "$(password_weakness 'Xk9#pQ2m')"
+eq "it contains 'frappeuser'" "$(password_weakness 'myfrappeuser-Pw1!' frappeuser)"
+eq "it contains 'erp'" "$(password_weakness 'Erp-Server-2024!' erp.example.com erp)"
+password_weakness 'Tr0ub4dor&3x!' >/dev/null && ok || bad "strong mixed password"
+password_weakness 'correct horse battery staple' >/dev/null && ok || bad "long passphrase"
+password_weakness 'alllowercaseletters' >/dev/null && ok || bad "16+ chars needs fewer kinds"
+fails password_weakness 'lowercaseonly'
+password_weakness "$(gen_password 20)" >/dev/null && ok || bad "generated passwords are strong"
+
+# Plain prompts read stdin in these tests instead of the terminal.
+np() { # np <input lines> <ask_new_password args...>: prints the chosen password, then the generated list
+	local input=$1; shift
+	(
+		_tty_read() { local __v=$1; shift; IFS= read -r "$@" "${__v?}"; }
+		FSS_UI=plain _FSS_TUI_CHECKED=0 ASSUME_DEFAULTS=0
+		ask_new_password out "$@" 2>/dev/null || exit 1
+		printf '%s\n' "$out" "${#FSS_GENERATED_SECRETS[@]}"
+	) <<<"$input"
+}
+
+t "ask_new_password: typed by the user"
+eq $'Tr0ub4dor&3x!\n0' "$(np $'Tr0ub4dor&3x!\nTr0ub4dor&3x!' "DB" "" 8)" "typed twice"
+eq $'Tr0ub4dor&3x!\n0' "$(np $'Tr0ub4dor&3x!\nmismatch\nTr0ub4dor&3x!\nTr0ub4dor&3x!' "DB" "" 8)" "mismatch asks again"
+eq $'Tr0ub4dor&3x!\n0' "$(np $'short\nTr0ub4dor&3x!\nTr0ub4dor&3x!' "DB" "" 8)" "too short asks again"
+eq $'Tr0ub4dor&3x!\n0' "$(np $'password1\nn\nTr0ub4dor&3x!\nTr0ub4dor&3x!' "DB" "" 8)" "weak, declined"
+eq $'password1\n0' "$(np $'password1\ny\npassword1' "DB" "" 8)" "weak, accepted"
+eq $'Tr0ub4dor&3x!\n0' "$(np $'site1-Secret-99\nn\nTr0ub4dor&3x!\nTr0ub4dor&3x!' "Admin" "" 4 site1.localhost site1)" "contains site name"
+
+t "ask_new_password: generated"
+out=$(np '' "DB" "" 8)
+[[ "$(sed -n 1p <<<"$out")" =~ ^[A-Za-z0-9]{20}$ ]] && ok || bad "generated: $out"
+eq 1 "$(sed -n 2p <<<"$out")" "remembered for the summary"
+(
+	_tty_read() { local __v=$1; shift; IFS= read -r "$@" "${__v?}"; }
+	FSS_UI=plain _FSS_TUI_CHECKED=0 ASSUME_DEFAULTS=0 FSS_CRED_FILE="$TMP/creds/b1.txt" F0=$FAIL
+	ask_new_password pw "MariaDB root password" "" 8 2>/dev/null <<<''
+	eq 600 "$(stat -c %a "$FSS_CRED_FILE")" "saved right away, private"
+	eq "MariaDB root password: $pw" "$(grep -v '^#' "$FSS_CRED_FILE")"
+	((FAIL == F0))
+) || bad "checks above"
+
+t "ask_new_password: resumed run reuses generated passwords"
+(
+	FSS_GENERATED_SECRETS=() _FSS_SECRETS=() FSS_CRED_FILE="$TMP/creds/b1.txt" F0=$FAIL
+	load_generated_secrets "$FSS_CRED_FILE"
+	eq 1 "${#FSS_GENERATED_SECRETS[@]}"
+	load_generated_secrets "$FSS_CRED_FILE"
+	eq 1 "${#FSS_GENERATED_SECRETS[@]}" "loading twice adds nothing"
+	saved=$(generated_secret "MariaDB root password")
+	ask_new_password pw "MariaDB root password" "" 8 2>/dev/null </dev/null
+	eq "$saved" "$pw" "no prompt, same password"
+	eq "x ****" "$(masked x "$saved")" "loaded passwords are masked"
+	((FAIL == F0))
+) || bad "checks above"
+load_generated_secrets "$TMP/does-not-exist" && ok || bad "missing file is fine"
+
+t "ask_new_password: unattended"
+(
+	_FSS_SECRETS=() ASSUME_DEFAULTS=1 F0=$FAIL
+	MY_PW='hunter22' ask_new_password v "DB" MY_PW 8 2>"$TMP/np.err"; eq hunter22 "$v" "env value used even if weak"
+	grep -q 'MY_PW is weak' "$TMP/np.err" && ok || bad "warns about the weak env password"
+	grep -q 'hunter22' "$TMP/np.err" && bad "warning must not show the password" || ok
+	eq "x ****" "$(masked x hunter22)" "env password masked"
+	fails ask_new_password v "DB" UNSET_PW 8
+	((FAIL == F0))
+) || bad "checks above"
+
 t "answers file"
 cat >"$TMP/a.conf" <<'EOF'
 # comment

@@ -106,9 +106,20 @@ All questions come first, so once you confirm the summary the install runs witho
    multitenancy and an optional Let's Encrypt certificate (the script checks that the domain resolves to
    this machine).
 
-**Passwords**: press Enter at a password prompt to generate a strong one. Generated passwords are shown
-once at the end (they are never written to the log) and saved in `~/.frappe-credentials/<bench>.txt`,
-readable only by you. Move them to a password manager and delete the file.
+**Passwords**: you choose the MariaDB root password, the site's Administrator login password and (when
+the installer is started as root and creates the bench user) that Linux user's login password. At each
+prompt, type your own password, or press Enter to generate a strong one:
+
+- typing is hidden, and you type the password twice to confirm it
+- it must be long enough (8 characters for MariaDB root, the Linux user and production sites, 4 for
+  development sites) and must not start or end with a space
+- a weak password (shorter than 12 characters, fewer than 3 kinds of characters, a common password, a
+  simple sequence, or one that contains the user or site name) is accepted only after you confirm it
+
+Generated passwords are shown once at the end (they are never written to the log) and saved, as soon as
+they are generated, in `~/.frappe-credentials/<bench>.txt`, readable only by you. A resumed install reads
+that file and keeps using the same passwords. Move them to a password manager and delete the file. A
+generated Linux user password is shown right away and saved in `~frappe/.frappe-credentials/`.
 
 Answers are checked as you type them: site and bench names, email addresses, Python/Node versions, git
 URLs and branches. A bad answer explains what is wrong and asks again.
@@ -187,6 +198,7 @@ above the menu.
 - back up one or all sites (with files, compressed)
 - restore a site from a backup (database plus public and private files)
 - remove (drop) a site, with a final backup and a typed confirmation
+- change a site's Administrator password (typed or generated, optionally logging everyone out)
 - set the default site
 - production: set up HTTPS with Let's Encrypt; development: toggle developer mode
 
@@ -262,6 +274,14 @@ DB_ROOT_PASSWORD='…' ADMIN_PASSWORD='…' ./install.sh --yes --apps erpnext,hr
 # Production server from an answers file (works when started as root on a fresh VPS, too)
 DB_ROOT_PASSWORD='…' ADMIN_PASSWORD='…' ./install.sh --yes --config my-server.conf
 ```
+
+| Variable | Password |
+|---|---|
+| `DB_ROOT_PASSWORD` | MariaDB root (also read by `manage-sites.sh` and `ops.sh`) |
+| `ADMIN_PASSWORD` | Administrator login of the site the installer creates |
+| `FRAPPE_USER_PASSWORD` | login password of the Linux user created when started as root |
+
+Unattended runs use these as given and only warn when one looks weak.
 
 `./install.sh --help` lists every flag. Flags win over the answers file. When started as root with
 `--yes`, the bench user is created without a password if `FRAPPE_USER_PASSWORD` is not set, and is

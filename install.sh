@@ -46,8 +46,12 @@ Answers (each one is also a KEY in the answers file; flags win over the file):
       --letsencrypt-email EMAIL            LETSENCRYPT_EMAIL (production, DNS multitenant)
       --user NAME                          FRAPPE_USER     owner of the bench when started as root
 
-Secrets come from the environment or the answers file, never from flags:
-  DB_ROOT_PASSWORD, ADMIN_PASSWORD, FRAPPE_USER_PASSWORD
+Passwords: at each password prompt type your own (hidden, asked twice, checked for strength) or press
+Enter to generate a strong one. Unattended runs take them from the environment or the answers file,
+never from flags (flags show up in the process list):
+  DB_ROOT_PASSWORD       MariaDB root password
+  ADMIN_PASSWORD         Administrator login of the new site
+  FRAPPE_USER_PASSWORD   login password of the Linux user created when started as root
 Other environment variables: FSS_LOG_DIR (log directory, default ~/frappe-setup-logs), NO_COLOR=1.
 
 Display:
@@ -387,6 +391,17 @@ if [[ -e "$BENCH_PATH" ]] && ! is_bench_dir "$BENCH_PATH"; then
 	die "$BENCH_PATH exists but is not a bench (left over from a failed 'bench init'?). Move it away and run ./install.sh again."
 fi
 
+# Generated passwords are written to this file as soon as they are generated, so a failed run
+# does not lose them; a resumed run reads them back and keeps using them.
+FSS_CRED_FILE="$HOME/.frappe-credentials/$BENCH_NAME.txt"
+if ((RESUMING)); then
+	load_generated_secrets "$FSS_CRED_FILE"
+elif [[ -s "$FSS_CRED_FILE" ]]; then
+	old_creds="$FSS_CRED_FILE.$(date +%Y%m%d-%H%M%S).old"
+	mv "$FSS_CRED_FILE" "$old_creds"
+	info "Kept the passwords of an earlier install of $BENCH_NAME in $old_creds."
+fi
+
 # MariaDB root password: asked now when MariaDB is not installed yet, so the install runs on its own.
 if [[ -z "${DB_ROOT_PASSWORD:-}" ]] && ! command -v mariadb >/dev/null 2>&1 && ! command -v mysql >/dev/null 2>&1; then
 	ask_new_password DB_ROOT_PASSWORD "MariaDB root password" DB_ROOT_PASSWORD 8
@@ -394,7 +409,7 @@ if [[ -z "${DB_ROOT_PASSWORD:-}" ]] && ! command -v mariadb >/dev/null 2>&1 && !
 fi
 
 header "6/6  Site"
-CREATE_SITE=0 SITE_NAME='' ADMIN_PW='' SITE_APPS=() DNS_MULTITENANT=0 LETSENCRYPT=0 LETSENCRYPT_EMAIL=''
+CREATE_SITE=0 SITE_NAME='' ADMIN_PW='' ADMIN_PASSWORD_KEPT=0 SITE_APPS=() DNS_MULTITENANT=0 LETSENCRYPT=0 LETSENCRYPT_EMAIL=''
 if ask_bool_preset CREATE_SITE "Create a site now?" y; then
 	CREATE_SITE=1
 	if preset SITE_NAME "Site name"; then
@@ -404,7 +419,13 @@ if ask_bool_preset CREATE_SITE "Create a site now?" y; then
 	else
 		ask_valid SITE_NAME "Site name (*.localhost names open in the browser without editing hosts)" "site1.localhost" valid_hostname_like
 	fi
-	ask_new_password ADMIN_PW "Administrator password for $SITE_NAME" ADMIN_PASSWORD "$([[ "$MODE" == production ]] && echo 8 || echo 4)"
+	if ((RESUMING)) && grep -qxsF 'done site' "$FSS_STATE_DIR/$STATE_NAME.steps"; then
+		info "$SITE_NAME was created by the earlier run; its Administrator password stays as it was."
+		generated_secret "Administrator password for $SITE_NAME" >/dev/null || ADMIN_PASSWORD_KEPT=1
+	else
+		ask_new_password ADMIN_PW "Administrator password for $SITE_NAME" ADMIN_PASSWORD \
+			"$([[ "$MODE" == production ]] && echo 8 || echo 4)" "$SITE_NAME" "${SITE_NAME%%.*}"
+	fi
 	if ((${#APPS[@]})); then
 		if preset SITE_APPS "Apps to install on $SITE_NAME"; then
 			case "${ANSWER[SITE_APPS],,}" in
@@ -666,11 +687,14 @@ fi
 # Generated passwords: saved to a private file and shown once on the terminal (never in the log).
 CRED_FILE=''
 if ((${#FSS_GENERATED_SECRETS[@]})); then
-	CRED_FILE="$HOME/.frappe-credentials/$BENCH_NAME.txt"
+	CRED_FILE=$FSS_CRED_FILE
 	save_generated_secrets "$CRED_FILE" || CRED_FILE=''
 fi
 secret_note() { # secret_note <label>
-	if generated_secret "$1" >/dev/null; then echo "(generated, see below)"; else echo "(the password you entered)"; fi
+	if generated_secret "$1" >/dev/null; then echo "(generated, see below)"
+	elif [[ "$1" == Administrator* && "${ADMIN_PASSWORD_KEPT:-0}" == 1 ]]; then echo "(set in the earlier run)"
+	else echo "(the password you entered)"
+	fi
 }
 
 info "Step timings:"
