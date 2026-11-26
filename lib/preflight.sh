@@ -71,7 +71,10 @@ pf_check_disk() {
 _pf_port_owner() {
 	local port=$1 out=''
 	if command -v ss >/dev/null 2>&1; then
-		out=$(ss -Hltnp "sport = :$port" 2>/dev/null || true)
+		# Process names of other users' listeners need root; use sudo only if it does not prompt.
+		if is_root; then out=$(ss -Hltnp "sport = :$port" 2>/dev/null || true)
+		else out=$(sudo -n ss -Hltnp "sport = :$port" 2>/dev/null || ss -Hltnp "sport = :$port" 2>/dev/null || true)
+		fi
 		if [[ -z "$out" ]]; then return 1; fi
 		grep -oE 'users:\(\("[^"]+"' <<<"$out" | head -1 | cut -d'"' -f2
 		return 0
@@ -200,6 +203,8 @@ preflight_checks() {
 			error "Some checks failed; the installation will probably not work."
 			if [[ "${FSS_SKIP_CHECKS:-0}" == 1 ]]; then
 				warn "FSS_SKIP_CHECKS=1: continuing anyway."
+			elif [[ "${ASSUME_DEFAULTS:-0}" == 1 && "${FSS_STRICT_CHECKS:-0}" != 1 ]]; then
+				warn "Unattended run: continuing anyway (set FSS_STRICT_CHECKS=1 to stop here instead)."
 			else
 				ask_yes_no "Continue anyway?" n || return 1
 			fi

@@ -230,9 +230,13 @@ if [[ "$MODE" == production ]] && ((IS_WSL)); then
 fi
 
 header "2/6  System check"
-preflight_checks "$MODE" "$HOME" || die "Stopped after the system check."
 CREATE_SWAP=0
-if [[ "${ASSUME_DEFAULTS:-0}" != 1 ]] && swap_recommended; then
+if ((RESUMING)); then
+	info "Resuming an earlier install; skipping the system check."
+else
+	preflight_checks "$MODE" "$HOME" || die "Stopped after the system check."
+fi
+if ((!RESUMING)) && [[ "${ASSUME_DEFAULTS:-0}" != 1 ]] && swap_recommended; then
 	ask_yes_no "This machine has little memory and no swap. Create a 4 GB swap file (/swapfile) so builds do not run out of memory?" y && CREATE_SWAP=1
 fi
 
