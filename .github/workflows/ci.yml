@@ -3,7 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "LICENSE", ".pre-commit-config.yaml"]
   pull_request:
+    # Draft PRs run only the lint job; the install matrix starts when the PR is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore: ["**.md", "LICENSE", ".pre-commit-config.yaml"]
   workflow_dispatch:
     inputs:
       frappe_branch:
@@ -31,6 +35,7 @@ jobs:
         run: bash tests/run-tests.sh
 
   install:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: install / ${{ matrix.image }} / ${{ matrix.mode }}${{ matrix.apps && format(' + {0}', matrix.apps) || '' }}
     needs: lint
     runs-on: ubuntu-latest
@@ -38,27 +43,58 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Newest release of each distro, plus the two newest Ubuntu LTS releases.
         include:
           - { image: "ubuntu:26.04", mode: development }
           - { image: "ubuntu:26.04", mode: production }
           - { image: "ubuntu:24.04", mode: development }
           - { image: "ubuntu:24.04", mode: production, apps: erpnext }
-          - { image: "ubuntu:22.04", mode: development }
-          - { image: "debian:12", mode: development }
-          - { image: "debian:12", mode: production }
           - { image: "debian:13", mode: development }
+          - { image: "debian:13", mode: production }
           - { image: "archlinux:latest", mode: development }
           - { image: "archlinux:latest", mode: production }
+    env:
+      # The weekly run uses no cache, so it still downloads everything the way a fresh machine does.
+      USE_CACHE: ${{ github.event_name != 'schedule' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Cache key
+        id: key
+        run: |
+          # One cache per distro, shared by its development and production jobs, renewed monthly
+          # and whenever the package lists change.
+          img='${{ matrix.image }}'
+          echo "prefix=dl-${img//[:\/]/-}-" >>"$GITHUB_OUTPUT"
+          echo "key=dl-${img//[:\/]/-}-$(date +%Y%m)-${{ hashFiles('lib/prereqs.sh', 'lib/apps.sh') }}" >>"$GITHUB_OUTPUT"
+          mkdir -p cache logs
+      - name: Restore download cache
+        id: cache
+        if: env.USE_CACHE == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: cache
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.prefix }}
       - name: Install in a fresh ${{ matrix.image }} container
         run: |
-          mkdir -p logs
+          cache_args=()
+          if [ "$USE_CACHE" = true ]; then cache_args=(-v "$PWD/cache:/cache" -e CI_CACHE=/cache); fi
           docker run --rm --hostname ci-host \
             -e FRAPPE_BRANCH='${{ inputs.frappe_branch || 'latest' }}' \
+            "${cache_args[@]}" \
             -v "$PWD:/src:ro" -v "$PWD/logs:/logs" \
             '${{ matrix.image }}' \
             bash /src/tests/container-install.sh '${{ matrix.mode }}' '${{ matrix.apps }}'
+      - name: Save download cache
+        # Saved by the development job only (the production job of the same distro reuses it),
+        # and only after a passing install, so a broken run never poisons the cache.
+        if: env.USE_CACHE == 'true' && matrix.mode == 'development' && steps.cache.outputs.cache-hit != 'true'
+        run: sudo chmod -R a+rX cache && sudo chown -R "$(id -u):$(id -g)" cache
+      - if: env.USE_CACHE == 'true' && matrix.mode == 'development' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: cache
+          key: ${{ steps.key.outputs.key }}
       - name: Make logs readable
         if: always()
         run: sudo chmod -R a+rX logs || true

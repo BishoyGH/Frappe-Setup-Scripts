@@ -18,6 +18,34 @@ export FSS_LOG_DIR=${FSS_LOG_DIR:-/logs}
 export DB_ROOT_PASSWORD=ci-db-root-pw ADMIN_PASSWORD=ci-admin-pw NO_COLOR=1
 mkdir -p "$FSS_LOG_DIR" && chmod 777 "$FSS_LOG_DIR"
 
+# Download cache (CI only): when $CI_CACHE is a mounted directory, keep the packages that apt/pacman,
+# uv, pip and yarn download there, so the next run can skip the downloads. Only downloads are cached:
+# every package is still installed, and every bench is still built, from scratch.
+if [[ -n "${CI_CACHE:-}" && -d "$CI_CACHE" ]]; then
+	mkdir -p "$CI_CACHE/home"
+	# The cache was restored by another user id on the host; let root and the bench user write to it.
+	chmod -R a+rwX "$CI_CACHE"
+	if command -v apt-get >/dev/null; then
+		mkdir -p "$CI_CACHE/apt/partial"
+		rm -f /etc/apt/apt.conf.d/docker-clean   # the image deletes downloaded .debs after every install
+		cat >/etc/apt/apt.conf.d/90ci-cache <<-EOF2
+			Dir::Cache::Archives "$CI_CACHE/apt";
+			APT::Keep-Downloaded-Packages "true";
+			Binary::apt::APT::Keep-Downloaded-Packages "true";
+		EOF2
+	elif command -v pacman >/dev/null; then
+		mkdir -p "$CI_CACHE/pacman"
+		sed -i "s|^#\?CacheDir.*|CacheDir = $CI_CACHE/pacman/|" /etc/pacman.conf
+		grep -q "^CacheDir = $CI_CACHE/pacman/" /etc/pacman.conf || sed -i "/^\[options\]/a CacheDir = $CI_CACHE/pacman/" /etc/pacman.conf
+	fi
+	# New users get ~/.cache from /etc/skel: point it at the cache (uv, pip, yarn and node-gyp live there).
+	mkdir -p /etc/skel /etc/uv
+	ln -sfn "$CI_CACHE/home" /etc/skel/.cache
+	# The cache is on another filesystem, so uv cannot hard-link from it; copy without warning.
+	echo 'link-mode = "copy"' >/etc/uv/uv.toml
+	echo "Using the download cache in $CI_CACHE ($(du -sh "$CI_CACHE" 2>/dev/null | cut -f1))."
+fi
+
 if [[ "$MODE" == production ]]; then SITE=ci.example.com; else SITE=ci.localhost; fi
 CONF=/root/ci-install.conf
 cat >"$CONF" <<EOF
