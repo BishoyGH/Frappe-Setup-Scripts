@@ -41,10 +41,13 @@ ui_set_title "Frappe Setup Scripts · Bench updater"
 header "Frappe bench updater"
 is_root && die "Run this script as the user that owns the bench, not as root."
 detect_os
+wsl_strip_windows_path
 load_runtime_env
 command -v bench >/dev/null 2>&1 || die "bench is not installed for $(id -un). Run ./install.sh first."
 
 select_bench BENCH
+# Stop cleanly before the disk (on WSL also the Windows drive) fills up or memory runs out.
+resource_guard_start "$BENCH"
 use_node_for_bench "$BENCH"
 mapfile -t SITES < <(bench_sites "$BENCH")
 mapfile -t APPS < <(bench_apps "$BENCH")

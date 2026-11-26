@@ -9,17 +9,14 @@ _FSS_PREFLIGHT_LOADED=1
 _PF_RESULTS=()
 _pf() { _PF_RESULTS+=("$1|$2|$3"); }
 
-_pf_mb() { awk -v k="$1" '$1 == k":" { printf "%d", $2 / 1024 }' /proc/meminfo 2>/dev/null; }
+# Thin wrappers around lib/resources.sh
+_pf_mb() { res_meminfo_mb "$1"; }
+_pf_free_mb() { res_free_mb "$1"; }
+_pf_fs() { res_mountpoint "$1"; }
+_pf_gb() { res_gb "$1"; }
 
-# _pf_free_mb <path>: free space (MB) on the filesystem holding <path> (or its nearest existing parent)
-_pf_free_mb() {
-	local p=$1
-	while [[ ! -e "$p" && "$p" != / ]]; do p=$(dirname "$p"); done
-	df -Pk "$p" 2>/dev/null | awk 'NR == 2 { printf "%d", $4 / 1024 }'
-}
-_pf_fs() { local p=$1; while [[ ! -e "$p" && "$p" != / ]]; do p=$(dirname "$p"); done; df -P "$p" 2>/dev/null | awk 'NR == 2 { print $6 }'; }
-
-_pf_gb() { awk -v m="$1" 'BEGIN { printf "%.1f GB", m / 1024 }'; }
+# Set when a check found a problem the watchdog would stop the run for anyway (see preflight_checks).
+_PF_HARD=0
 
 pf_check_memory() {
 	local mem swap
@@ -44,24 +41,44 @@ pf_check_cpu() {
 	fi
 }
 
+# _pf_disk_one <label> <free-MB>: rate the free space of one filesystem.
+_pf_disk_one() {
+	local label=$1 free=$2 hard=$(( ${FSS_MIN_FREE_MB:-2048} + 1024 ))
+	if ((free < hard)); then
+		_PF_HARD=1
+		_pf fail "$label" "$(_pf_gb "$free") free. The install would stop with a full disk; free at least 5 GB first (15 GB recommended)."
+	elif ((free < 5000)); then
+		_pf fail "$label" "$(_pf_gb "$free") free. A bench with apps needs at least 5 GB; 15 GB or more is recommended."
+	elif ((free < 15000)); then
+		_pf warn "$label" "$(_pf_gb "$free") free. 15 GB or more is recommended (apps, node_modules, caches, backups)."
+	else
+		_pf ok "$label" "$(_pf_gb "$free") free"
+	fi
+}
+
 pf_check_disk() {
 	local path=${1:-$HOME} free free_root fs fs_root
-	free=$(_pf_free_mb "$path"); free=${free:-0}
+	free=$(_pf_free_mb "$path")
 	fs=$(_pf_fs "$path")
-	if ((free < 5000)); then
-		_pf fail "Disk ($fs)" "$(_pf_gb "$free") free. A bench with apps needs at least 5 GB; 15 GB or more is recommended."
-	elif ((free < 15000)); then
-		_pf warn "Disk ($fs)" "$(_pf_gb "$free") free. 15 GB or more is recommended (apps, node_modules, backups)."
-	else
-		_pf ok "Disk ($fs)" "$(_pf_gb "$free") free"
-	fi
+	_pf_disk_one "Disk ($fs)" "$free"
 	fs_root=$(_pf_fs /var/lib)
 	if [[ -n "$fs_root" && "$fs_root" != "$fs" ]]; then
-		free_root=$(_pf_free_mb /var/lib); free_root=${free_root:-0}
+		free_root=$(_pf_free_mb /var/lib)
 		if ((free_root < 2000)); then
 			_pf warn "Disk ($fs_root)" "$(_pf_gb "$free_root") free. MariaDB stores databases in /var/lib/mysql."
 		else
 			_pf ok "Disk ($fs_root)" "$(_pf_gb "$free_root") free (MariaDB data)"
+		fi
+	fi
+	# WSL: the Linux disk is a file on a Windows drive that grows as WSL writes. Inside WSL, df shows
+	# that virtual disk's maximum size, so the Windows drive is what can actually run out.
+	if ((IS_WSL)); then
+		wsl_detect_host_drive
+		if [[ -n "$FSS_WSL_HOST_MNT" ]]; then
+			_pf_disk_one "Windows $FSS_WSL_HOST_DRIVE" "$(_pf_free_mb "$FSS_WSL_HOST_MNT")"
+			_PF_RESULTS[-1]+=" (WSL's virtual disk grows on this drive and does not shrink by itself)"
+		else
+			_pf warn "Windows drive" "Could not see the Windows drive that holds WSL's virtual disk (is /mnt/c mounted?). Make sure it has 15 GB or more free: WSL's disk grows there."
 		fi
 	fi
 }
@@ -146,9 +163,53 @@ pf_check_platform() {
 		else
 			_pf fail "WSL" "This looks like WSL 1. MariaDB and Redis need WSL 2: run 'wsl --set-version <distro> 2' in Windows."
 		fi
+		pf_check_wsl
 	elif ! has_systemd; then
 		_pf warn "Init system" "systemd is not running (container?). Services are started directly, and do not start again after a reboot."
 	fi
+}
+
+# pf_check_wsl: WSL settings that decide how much of Windows' memory and disk a long build may take.
+pf_check_wsl() {
+	local win cfg
+	if wsl_on_windows_drive "$HOME"; then
+		_PF_HARD=1
+		_pf fail "WSL files" "$HOME is on a Windows drive. Benches must live on the Linux disk (e.g. /home/<user>): Windows drives are much slower and break file permissions."
+	elif [[ -n "${SCRIPT_DIR:-}" ]] && wsl_on_windows_drive "$SCRIPT_DIR"; then
+		_pf warn "WSL files" "The scripts run from a Windows drive ($SCRIPT_DIR). That works, but cloning them into the Linux home is faster: see get.sh."
+	fi
+	win=$(wsl_windows_home)
+	if [[ -z "$win" ]]; then
+		_pf warn "WSL limits" "Could not read %UserProfile%\\.wslconfig (Windows interop off?). Without a memory limit WSL can take half of Windows' memory; see the README section 'WSL'."
+		return 0
+	fi
+	cfg="$win/.wslconfig"
+	FSS_WSLCONFIG=$cfg
+	if wslconfig_has "$cfg" memory; then
+		_pf ok "WSL limits" "memory limit set in .wslconfig ($(grep -iE '^[[:space:]]*memory[[:space:]]*=' "$cfg" | head -1 | tr -d ' \r'))"
+	else
+		_pf warn "WSL limits" "No memory limit in $cfg: WSL may use up to half of Windows' memory (more as file cache) during builds."
+	fi
+}
+
+# wsl_offer_wslconfig: offer to create %UserProfile%\.wslconfig with memory/swap limits when it does
+# not exist yet. Returns 0 when the file was written (WSL must restart for it to apply).
+wsl_offer_wslconfig() {
+	((IS_WSL)) || return 1
+	[[ "${ASSUME_DEFAULTS:-0}" == 1 ]] && return 1
+	local cfg=${FSS_WSLCONFIG:-}
+	[[ -n "$cfg" ]] || return 1
+	if [[ -e "$cfg" ]]; then
+		wslconfig_has "$cfg" memory && return 1
+		info "Suggested settings for $cfg (add the missing ones yourself, then run 'wsl --shutdown'):"
+		wslconfig_recommended | sed 's/^/     /' >&2
+		return 1
+	fi
+	ui_details "$(wslconfig_recommended | sed 's/^/   /')"
+	ask_yes_no "Create $cfg with these limits, so a build cannot take all of Windows' memory?" y || return 1
+	wslconfig_recommended | sed 's/$/\r/' >"$cfg" || { warn "Could not write $cfg."; return 1; }
+	success "Wrote $cfg."
+	return 0
 }
 
 # pf_check_dns <domain>: does the domain resolve to this machine? (needed for Let's Encrypt)
@@ -185,16 +246,22 @@ preflight_report() {
 
 # preflight_checks <mode> [bench-parent-dir]: run the machine checks and ask whether to go on
 # when something failed. Returns 1 if the user chose to stop.
+# With "quick" as the third argument only memory and disk are checked (used when resuming).
 preflight_checks() {
-	local mode=${1:-development} dir=${2:-$HOME} rc=0
-	_PF_RESULTS=()
+	local mode=${1:-development} dir=${2:-$HOME} scope=${3:-full} rc=0
+	_PF_RESULTS=() _PF_HARD=0
 	info "Checking this machine..."
-	pf_check_platform
-	pf_check_memory
-	pf_check_cpu
-	pf_check_disk "$dir"
-	pf_check_ports "$mode"
-	pf_check_network
+	if [[ "$scope" == quick ]]; then
+		pf_check_memory
+		pf_check_disk "$dir"
+	else
+		pf_check_platform
+		pf_check_memory
+		pf_check_cpu
+		pf_check_disk "$dir"
+		pf_check_ports "$mode"
+		pf_check_network
+	fi
 	preflight_report || rc=$?
 	case "$rc" in
 		0) success "All checks passed." ;;
@@ -203,6 +270,9 @@ preflight_checks() {
 			error "Some checks failed; the installation will probably not work."
 			if [[ "${FSS_SKIP_CHECKS:-0}" == 1 ]]; then
 				warn "FSS_SKIP_CHECKS=1: continuing anyway."
+			elif ((_PF_HARD)) && [[ "${ASSUME_DEFAULTS:-0}" == 1 ]]; then
+				error "Not enough disk space (or a bench on a Windows drive): stopping. FSS_SKIP_CHECKS=1 continues anyway."
+				return 1
 			elif [[ "${ASSUME_DEFAULTS:-0}" == 1 && "${FSS_STRICT_CHECKS:-0}" != 1 ]]; then
 				warn "Unattended run: continuing anyway (set FSS_STRICT_CHECKS=1 to stop here instead)."
 			else
