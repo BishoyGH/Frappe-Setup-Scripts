@@ -16,9 +16,9 @@ updated and manage its sites.
 
 | OS | Notes |
 | --- | --- |
-| Ubuntu 22.04, 24.04 (and newer) | tested end to end |
-| Debian 11, 12, 13 | |
-| Arch Linux (and derivatives such as Manjaro, EndeavourOS) | Redis is provided by Valkey when available; wkhtmltopdf is unpacked from the official Debian build |
+| Ubuntu 22.04, 24.04, 26.04 | tested in CI |
+| Debian 12, 13 (11 untested) | tested in CI |
+| Arch Linux (and derivatives such as Manjaro, EndeavourOS) | tested in CI; Redis is provided by Valkey when available; wkhtmltopdf is unpacked from the official Debian build |
 | Any of the above under **WSL 2** | works with or without systemd; the installer offers to enable systemd in `/etc/wsl.conf` |
 
 x86_64 and arm64 are supported.
@@ -74,7 +74,7 @@ It then shows a summary and, once you confirm, installs:
 - **nginx + supervisor** for production
 
 The bench gets a `.nvmrc` with its Node version, so different benches can use different Node versions.
-A full log of each run is written to `~/frappe-setup-logs/`.
+A full log of each run is written to `~/frappe-setup-logs/` (see [Logs](#logs)).
 
 After a development install:
 
@@ -175,19 +175,51 @@ environment win over the file, for example
 The cron jobs run the scripts from where they are, so keep this folder in place (or run `schedule`
 again after moving it).
 
-## Non-interactive use
+## Unattended installs
 
-Every prompt has a default. `ASSUME_DEFAULTS=1` accepts all of them, and secrets come from the
-environment:
+Every question can be answered in advance, with flags or with an answers file
+([`examples/install.conf`](examples/install.conf)); `--yes` takes the default for anything not
+answered. Secrets come from the environment (or the answers file), never from flags, and are masked
+in the output and the log.
 
 ```bash
-ASSUME_DEFAULTS=1 DB_ROOT_PASSWORD='…' ADMIN_PASSWORD='…' ./install.sh
+# Development bench with ERPNext + HR, site dev.localhost, no questions asked
+DB_ROOT_PASSWORD='…' ADMIN_PASSWORD='…' ./install.sh --yes --apps erpnext,hrms --site dev.localhost
+
+# Production server from an answers file (works when started as root on a fresh VPS, too)
+DB_ROOT_PASSWORD='…' ADMIN_PASSWORD='…' ./install.sh --yes --config my-server.conf
 ```
 
-Other variables: `BENCH_PATH` (bench used by the update/site/ops scripts), `FRAPPE_USER` /
-`FRAPPE_USER_PASSWORD` (user created when run as root), `FSS_AUTO_ROLLBACK=0`, `NO_COLOR=1`.
-For `ops.sh schedule`: `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`,
-`OFFSITE_CRYPT_PASSWORD`.
+`./install.sh --help` lists every flag. Flags win over the answers file. When started as root with
+`--yes`, the bench user is created without a password if `FRAPPE_USER_PASSWORD` is not set, and is
+given passwordless sudo only while the installer runs.
+
+`update-bench.sh` takes `--yes --action update|upgrade|apps|migrate|build [bench-path]`, e.g. for cron:
+`./update-bench.sh --yes --action update ~/frappe-bench`. Other variables: `BENCH_PATH` (bench used by
+the update/site/ops scripts), `FSS_LOG_DIR`, `FSS_AUTO_ROLLBACK=0`, `NO_COLOR=1`. For `ops.sh schedule`:
+`S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `OFFSITE_CRYPT_PASSWORD`.
+
+## Re-running and resuming
+
+The installer records each finished step in `~/.local/state/frappe-setup-scripts/`. If a run stops
+(network failure, a full disk, Ctrl+C), fix the cause and run the same command again: it offers to
+resume with the saved answers (automatically with `--yes`) and skips the steps that already finished.
+`--resume` forces resuming, `--fresh` starts over. Re-running a finished unattended install does nothing
+and exits successfully, so the command is safe to repeat from provisioning tools.
+
+## Logs
+
+Every run of `install.sh`, `update-bench.sh` and `manage-sites.sh` writes a log to
+`~/frappe-setup-logs/` (or `$FSS_LOG_DIR`): the full output without colour codes, readable only by you,
+with passwords replaced by `****`. The newest 20 logs per script are kept. When a command fails the
+error message names the log file.
+
+## Testing
+
+[CI](.github/workflows/ci.yml) runs shellcheck and the offline unit tests (`tests/run-tests.sh`), then
+a full unattended install in fresh Ubuntu 22.04/24.04/26.04, Debian 12/13 and Arch Linux containers, in
+development and production mode. Each install is stopped half-way on purpose, resumed, re-run, and then
+checked by pinging the site. The install tests also run weekly to catch upstream changes.
 
 ## Layout
 
@@ -201,6 +233,9 @@ lib/common.sh       prompts, OS detection, services, bench helpers
 lib/prereqs.sh      packages, MariaDB, wkhtmltopdf, uv/Python, nvm/Node, bench, nginx/supervisor
 lib/apps.sh         official app catalog, dependencies, branch matching
 lib/ops.sh          backup sets, offsite (rclone), restore points and rollback, health checks, cron
+lib/unattended.sh   preset answers (flags / answers file) and resumable steps
+examples/           sample answers file for unattended installs
+tests/              unit tests and the container install test used by CI
 ```
 
 ## Notes

@@ -44,6 +44,9 @@ command -v bench >/dev/null 2>&1 || [[ "$CMD" == secure ]] || die "bench is not 
 
 QUIET=0
 [[ "$CMD" == status && " $* " == *" --quiet "* ]] && QUIET=1
+# Health checks run every few minutes from cron; only the other commands get a log file.
+FSS_ARGS="$CMD $*"
+[[ "$CMD" == status ]] || setup_logging ops
 ((QUIET)) || header "Frappe production operations"
 select_bench BENCH
 BENCH_NAME=$(basename "$BENCH")
@@ -207,7 +210,12 @@ EOF
 		keyfile="$BACKUP_DIR/OFFSITE-ENCRYPTION-PASSWORD.txt"
 		mkdir -p "$BACKUP_DIR"
 		( umask 077; printf 'rclone crypt password for %s\n%s\n' "$remote" "$pw" >"$keyfile" )
-		warn "Encryption password: ${C_BOLD}$pw${C_RESET}"
+		# Shown on the terminal only, so it does not end up in the log file.
+		if { : >/dev/tty; } 2>/dev/null; then
+			printf '%s!%s  Encryption password: %s%s%s\n' "$C_YELLOW$C_BOLD" "$C_RESET" "$C_BOLD" "$pw" "$C_RESET" >/dev/tty
+		else
+			warn "Encryption password: see $keyfile"
+		fi
 		warn "Store it in a password manager NOW. Without it the offsite backups cannot be restored on another server."
 		warn "(A copy is in $keyfile, which is lost together with this server.)"
 		pause
@@ -318,9 +326,11 @@ cmd_restore() {
 					< <(rclone lsf --dirs-only "${OFFSITE_REMOTE%/}" 2>/dev/null | sed 's#/$##')
 			else
 				from_opts=("$site")
-				for f in "$BACKUP_DIR"/*/ "$BENCH"/sites/*/private/backups/; do
+				local -a dirs=()
+				if [[ "$src" == bench ]]; then dirs=("$BENCH"/sites/*/private/backups/); else dirs=("$BACKUP_DIR"/*/); fi
+				for f in "${dirs[@]}"; do
 					[[ -d "$f" ]] || continue
-					if [[ "$src" == bench ]]; then f=${f%/private/backups/}; else f=${f%/}; fi
+					f=${f%/}; [[ "$src" == bench ]] && f=${f%/private/backups}
 					f=$(basename "$f")
 					[[ "$f" == "$site" || "$f" == restore-points ]] || from_opts+=("$f")
 				done

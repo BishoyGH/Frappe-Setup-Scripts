@@ -20,6 +20,8 @@ if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
 fi
 [[ -n "${1:-}" ]] && BENCH_PATH=$1
 
+FSS_ARGS="$*"
+setup_logging manage-sites
 header "Frappe site manager"
 is_root && die "Run this script as the user that owns the bench, not as root."
 detect_os
@@ -29,6 +31,7 @@ select_bench BENCH
 use_node_for_bench "$BENCH"
 PROD=0; bench_is_production "$BENCH" && PROD=1
 DB_ROOT_PW=${DB_ROOT_PASSWORD:-}
+mask_secret "$DB_ROOT_PW"
 ensure_bench_redis "$BENCH"
 
 # --------------------------------------------------------------------------

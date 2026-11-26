@@ -5,7 +5,8 @@
 #  - apps:    update only some apps
 #  - migrate / build: run just that step
 #
-# Usage: ./update-bench.sh [bench-path]
+# Usage: ./update-bench.sh [--yes] [--action update|upgrade|apps|migrate|build] [bench-path]
+#   --yes accepts every default (e.g. for cron: ./update-bench.sh --yes --action update ~/frappe-bench)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -18,12 +19,22 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/ops.sh"
 strict_mode
 
-if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
-	sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
-	exit 0
-fi
-[[ -n "${1:-}" ]] && BENCH_PATH=$1
+FSS_ARGS="$*"
+ACTION=''
+while (($#)); do
+	case "$1" in
+		-h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-y|--yes|--non-interactive) ASSUME_DEFAULTS=1 ;;
+		--action) [[ $# -ge 2 ]] || die "--action needs a value."; ACTION=$2; shift ;;
+		--action=*) ACTION=${1#*=} ;;
+		-*) die "Unknown option: $1 (see --help)" ;;
+		*) BENCH_PATH=$1 ;;
+	esac
+	shift
+done
+case "${ACTION:-update}" in update|upgrade|apps|migrate|build|quit) ;; *) die "Unknown action: $ACTION" ;; esac
 
+setup_logging update-bench
 header "Frappe bench updater"
 is_root && die "Run this script as the user that owns the bench, not as root."
 detect_os
@@ -162,7 +173,7 @@ do_upgrade() {
 	while read -r b; do
 		[[ -z "$b" ]] && continue
 		opts+=("$b|Frappe v${b#version-}")
-	done < <(frappe_release_branches | head -4)
+	done < <(frappe_release_branches 4)
 	opts+=("develop|Unreleased development branch")
 	choose target "Upgrade (or switch) to which version?" 1 "${opts[@]}"
 	major=$(frappe_major_from_ref "$target")
@@ -204,7 +215,6 @@ do_upgrade() {
 	warn_dev_server
 	backup_sites
 	ask_yes_no "Start the upgrade now?" y || die "Aborted."
-	setup_logging upgrade
 
 	if ((change_node)); then
 		install_node "$node"
@@ -253,7 +263,7 @@ do_apps() {
 }
 
 show_status
-choose ACTION "What do you want to do?" 1 \
+[[ -n "$ACTION" ]] || choose ACTION "What do you want to do?" 1 \
 	"update|Pull latest changes on current branches, migrate all sites, rebuild, restart" \
 	"upgrade|Upgrade to another Frappe major version (e.g. v15 -> v16)" \
 	"apps|Update only selected apps (and migrate all sites)" \
@@ -264,11 +274,10 @@ choose ACTION "What do you want to do?" 1 \
 case "$ACTION" in
 	update)
 		ask_yes_no "Update ${#APPS[@]} app(s) and migrate ${#SITES[@]} site(s)?" y || die "Aborted."
-		setup_logging update
 		do_update
 		;;
 	upgrade) do_upgrade ;;
-	apps) setup_logging update; do_apps ;;
+	apps) do_apps ;;
 	migrate)
 		ensure_bench_redis "$BENCH"
 		for s in "${SITES[@]}"; do header "Migrating $s"; with_bench "$BENCH" --site "$s" migrate; done
