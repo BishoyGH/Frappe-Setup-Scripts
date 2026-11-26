@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Main menu for Frappe-Setup-Scripts.
-# Usage: ./frappe-setup.sh [install|update|sites|check] [--plain] [--quiet]
+# Usage: ./frappe-setup.sh [install|update|sites|ops|check] [--plain] [--quiet]
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -37,10 +37,11 @@ case "${1:-}" in
 	install) shift; exec bash "$SCRIPT_DIR/install.sh" "$@" ;;
 	update) shift; exec bash "$SCRIPT_DIR/update-bench.sh" "$@" ;;
 	sites) shift; exec bash "$SCRIPT_DIR/manage-sites.sh" "$@" ;;
+	ops) shift; exec bash "$SCRIPT_DIR/ops.sh" "$@" ;;
 	check|doctor) shift; run_check "$@"; exit 0 ;;
 	-h|--help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; echo; ui_flags_help; exit 0 ;;
 	'') ;;
-	*) die "Unknown command: $1 (use install, update, sites or check)" ;;
+	*) die "Unknown command: $1 (use install, update, sites, ops or check)" ;;
 esac
 
 # Status of the benches already on this machine, shown above the menu.
@@ -71,12 +72,14 @@ choose ACTION "What do you want to do?" "$default" \
 	"install|Install Frappe + apps on this machine (new bench)" \
 	"update|Update or upgrade an existing bench and all its sites" \
 	"sites|Create, migrate, back up, restore or remove sites" \
+	"ops|Production: scheduled backups, restore, rollback, health, security" \
 	"check|Check this machine (memory, disk, ports, network)" \
 	"quit|Exit"
 case "$ACTION" in
 	install) exec bash "$SCRIPT_DIR/install.sh" ;;
 	update) exec bash "$SCRIPT_DIR/update-bench.sh" ;;
 	sites) exec bash "$SCRIPT_DIR/manage-sites.sh" ;;
+	ops) exec bash "$SCRIPT_DIR/ops.sh" ;;
 	check) run_check ;;
 	quit) exit 0 ;;
 esac
