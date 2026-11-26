@@ -21,11 +21,17 @@ fi
 
 info()    { printf '%s==>%s %s\n' "${C_BLUE}${C_BOLD}" "${C_RESET}" "$*" >&2; }
 success() { printf '%s✔%s  %s\n' "${C_GREEN}${C_BOLD}" "${C_RESET}" "$*" >&2; }
-warn()    { printf '%s!%s  %s\n' "${C_YELLOW}${C_BOLD}" "${C_RESET}" "$*" >&2; }
+warn()    { printf '%s!%s  %s\n' "${C_YELLOW}${C_BOLD}" "${C_RESET}" "$*" >&2; _ui_note "! $*"; }
 error()   { printf '%s✖%s  %s\n' "${C_RED}${C_BOLD}" "${C_RESET}" "$*" >&2; }
 die()     { error "$*"; exit 1; }
 header()  {
 	local line
+	_UI_SECTION=$*
+	# Inside a numbered step (see phase in ui.sh) headers become sub-headings.
+	if [[ "${_FSS_IN_PHASE:-0}" == 1 ]]; then
+		printf '%s── %s%s\n' "${C_CYAN}" "$*" "${C_RESET}" >&2
+		return 0
+	fi
 	line=$(printf '%*s' 64 '' | tr ' ' '-')
 	printf '\n%s%s\n %s\n%s%s\n' "${C_CYAN}${C_BOLD}" "$line" "$*" "$line" "${C_RESET}" >&2
 }
@@ -41,6 +47,7 @@ masked() {
 
 # run: print the command (secrets masked), then execute it. Fails the script on error (set -e).
 run() {
+	if ui_quiet_active; then _ui_run_quiet "$@"; return; fi
 	printf '%s$ %s%s\n' "${C_DIM}" "$(masked "$*")" "${C_RESET}" >&2
 	"$@"
 }
@@ -56,7 +63,10 @@ on_exit() { _FSS_EXIT_HOOKS+=("$*"); trap _fss_run_exit_hooks EXIT; }
 
 # Standard strict mode + error report for the entry scripts.
 _fss_on_err() {
+	# A function passing on a failure (return "$rc") was already reported where it failed.
+	[[ "$3" == return* ]] && return 0
 	error "Command failed (exit $1) at line $2: $3"
+	[[ -n "${_FSS_CURRENT_PHASE:-}" ]] && error "During $_FSS_CURRENT_PHASE"
 	[[ -n "${FSS_LOG_FILE:-}" ]] && error "Full log: $FSS_LOG_FILE"
 	return 0
 }
@@ -92,6 +102,7 @@ ask() {
 		printf '%s?%s %s %s[%s]%s\n' "${C_CYAN}" "${C_RESET}" "$__prompt" "${C_DIM}" "$__default" "${C_RESET}" >&2
 		return 0
 	fi
+	if tui_active; then _tui_ask "$__var" "$__prompt" "$__default" 1; return 0; fi
 	while true; do
 		if [[ -n "$__default" ]]; then
 			printf '%s?%s %s %s[%s]%s: ' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__prompt" "${C_DIM}" "$__default" "${C_RESET}" >&2
@@ -112,6 +123,7 @@ ask_optional() {
 	if [[ "${ASSUME_DEFAULTS:-0}" == 1 ]]; then
 		printf -v "$__var" '%s' "$__default"; return 0
 	fi
+	if tui_active; then _tui_ask "$__var" "$__prompt" "$__default" 0; return 0; fi
 	printf '%s?%s %s %s[%s]%s: ' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__prompt" "${C_DIM}" "${__default:-none}" "${C_RESET}" >&2
 	_tty_read __reply
 	printf -v "$__var" '%s' "${__reply:-$__default}"
@@ -128,6 +140,7 @@ ask_secret() {
 	if [[ "${ASSUME_DEFAULTS:-0}" == 1 ]]; then
 		die "ASSUME_DEFAULTS is set but no value for '${__prompt}' was provided${__envvar:+ (set $__envvar)}."
 	fi
+	if tui_active; then _tui_secret "$__var" "$__prompt" "$__confirm"; mask_secret "${!__var}"; return 0; fi
 	while true; do
 		printf '%s?%s %s: ' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__prompt" >&2
 		_tty_read __a -s
@@ -153,6 +166,7 @@ ask_yes_no() {
 		printf '%s?%s %s [%s] %s\n' "${C_CYAN}" "${C_RESET}" "$__prompt" "$__hint" "$__default" >&2
 		[[ "$__default" == y ]]; return
 	fi
+	if tui_active; then _tui_yes_no "$__prompt" "$__default"; return; fi
 	while true; do
 		printf '%s?%s %s [%s]: ' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__prompt" "$__hint" >&2
 		_tty_read __reply
@@ -171,6 +185,7 @@ choose() {
 	local __var=$1 __prompt=$2 __default=$3; shift 3
 	local -a __opts=("$@")
 	local __i __reply='' __val __desc
+	if tui_active; then _tui_choose "$__var" "$__prompt" "$__default" "${__opts[@]}"; return 0; fi
 	printf '%s?%s %s\n' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__prompt" >&2
 	for __i in "${!__opts[@]}"; do
 		__val=${__opts[$__i]%%|*}
@@ -200,6 +215,7 @@ choose_multi() {
 	local __var=$1 __prompt=$2 __default=$3; shift 3
 	local -a __opts=("$@") __picked=()
 	local __i __reply='' __val __desc __ok __n
+	if tui_active; then _tui_choose_multi "$__var" "$__prompt" "$__default" "${__opts[@]}"; return 0; fi
 	printf '%s?%s %s\n' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__prompt" >&2
 	for __i in "${!__opts[@]}"; do
 		__val=${__opts[$__i]%%|*}
@@ -238,6 +254,7 @@ choose_multi() {
 	eval "$__var=(\"\${__picked[@]}\")"
 }
 
+# pause stays a plain prompt in dialog mode too, so the output above it remains readable.
 pause() {
 	[[ "${ASSUME_DEFAULTS:-0}" == 1 ]] && return 0
 	local _r
@@ -585,6 +602,8 @@ setup_logging() {
 		printf '# command: %s\n' "$(masked "$0 ${FSS_ARGS:-}")"
 	} >>"$FSS_LOG_FILE"
 	info "Logging to $FSS_LOG_FILE"
+	ui_quiet_active && info "Quiet mode: command output goes to the log only."
+	return 0
 }
 
 # Wait for the log writer so the last lines are not lost when the script exits.
@@ -601,3 +620,7 @@ _fss_flush_log() {
 	kill "$_FSS_LOG_PID" 2>/dev/null || true
 	_FSS_LOG_PID=''
 }
+
+# Dialog boxes, validation, progress and summary helpers.
+# shellcheck source=lib/ui.sh
+. "$(dirname "${BASH_SOURCE[0]}")/ui.sh"
