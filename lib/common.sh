@@ -279,8 +279,9 @@ ensure_sudo() {
 	# "sudo true" rather than "sudo -v": -v asks for a password even with NOPASSWD rules
 	# when another rule (e.g. %sudo) matches, which breaks cloud images without passwords.
 	sudo true || die "Could not obtain sudo privileges."
-	# Keep the sudo timestamp fresh while the script runs.
-	( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null; sleep 50; done ) &
+	# Keep the sudo timestamp fresh while the script runs. Its output goes to /dev/null so a
+	# leftover "sleep" never holds the log pipe (or a caller's "| tee") open after we exit.
+	( while kill -0 "$$" 2>/dev/null; do sudo -n true; sleep 50; done ) </dev/null >/dev/null 2>&1 &
 	on_exit "kill $! 2>/dev/null"
 }
 

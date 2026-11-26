@@ -25,8 +25,8 @@ main menu. The questions appear as dialog boxes (arrow keys, Space to tick, Ente
 
 | OS | Notes |
 | --- | --- |
-| Ubuntu 22.04, 24.04, 26.04 | tested in CI |
-| Debian 12, 13 (11 untested) | tested in CI |
+| Ubuntu 24.04, 26.04 (22.04 should work) | 24.04 and 26.04 tested in CI |
+| Debian 13 (12 should work, 11 untested) | 13 tested in CI |
 | Arch Linux (and derivatives such as Manjaro, EndeavourOS) | tested in CI; Redis is provided by Valkey when available; wkhtmltopdf is unpacked from the official Debian build. Install `libnewt` for dialog boxes |
 | Any of the above under **WSL 2** | works with or without systemd; the installer offers to enable systemd in `/etc/wsl.conf` |
 
@@ -290,9 +290,15 @@ error message names the log file.
 ## Testing
 
 [CI](.github/workflows/ci.yml) runs shellcheck and the offline unit tests (`tests/run-tests.sh`), then
-a full unattended install in fresh Ubuntu 22.04/24.04/26.04, Debian 12/13 and Arch Linux containers, in
-development and production mode. Each install is stopped half-way on purpose, resumed, re-run, and then
-checked by pinging the site. The install tests also run weekly to catch upstream changes.
+a full unattended install in fresh containers of the newest release of each distro (Ubuntu 24.04 and 26.04,
+the two newest LTS releases; Debian 13; Arch Linux), in development and production mode. Each install is
+stopped half-way on purpose, resumed, re-run, and then checked by pinging the site.
+
+To keep CI fast, the install jobs cache what apt/pacman, uv, pip and yarn download (one cache per distro,
+renewed monthly and when `lib/prereqs.sh` or `lib/apps.sh` change); every package is still installed and
+every bench still built from scratch. The weekly run uses no cache, so it also catches upstream changes
+(Frappe, distro packages, mirrors) the way a fresh machine would. Draft pull requests and changes that
+only touch Markdown run no install tests.
 
 ## Layout
 
