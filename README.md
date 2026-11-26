@@ -300,6 +300,9 @@ every bench still built from scratch. The weekly run uses no cache, so it also c
 (Frappe, distro packages, mirrors) the way a fresh machine would. Draft pull requests and changes that
 only touch Markdown run no install tests.
 
+To run the same shellcheck and `bash -n` checks on each commit: `pipx install pre-commit && pre-commit install`
+(see [.pre-commit-config.yaml](.pre-commit-config.yaml)).
+
 ## Layout
 
 ```
