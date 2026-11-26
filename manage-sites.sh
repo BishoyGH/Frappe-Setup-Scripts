@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interactive site manager for a Frappe bench:
-# list, create, migrate, back up, restore and remove sites; install/uninstall apps;
-# fetch new apps into the bench; set the default site; HTTPS for production benches.
+# list, create, migrate, back up, restore and remove sites; change a site's Administrator password;
+# install/uninstall apps; fetch new apps into the bench; set the default site; HTTPS for production benches.
 #
 # Usage: ./manage-sites.sh [--plain] [--quiet] [bench-path]
 
@@ -98,7 +98,7 @@ create_site() {
 	local site admin_pw def_name apps_opts=() apps=() a
 	if ((PROD)); then def_name=$(hostname -f 2>/dev/null || cat /etc/hostname 2>/dev/null || echo site1.local); else def_name="site$(( $(bench_sites "$BENCH" | wc -l) + 1 )).localhost"; fi
 	ask_valid site "Site name" "$def_name" valid_site_name "$BENCH"
-	ask_new_password admin_pw "Administrator password for $site" "" "$( ((PROD)) && echo 8 || echo 4)"
+	ask_new_password admin_pw "Administrator password for $site" "" "$( ((PROD)) && echo 8 || echo 4)" "$site" "${site%%.*}"
 	get_db_root_pw
 	mapfile -t apps_opts < <(bench_apps "$BENCH" | grep -vx frappe || true)
 	if ((${#apps_opts[@]})); then
@@ -110,9 +110,7 @@ create_site() {
 	b "${args[@]}"
 	check_site_apps "$BENCH" "$site" "${apps[@]}" || true
 	local gen
-	if gen=$(generated_secret "Administrator password for $site"); then
-		printf '\n   %sAdministrator password for %s:%s %s%s%s  (shown once, not logged)\n\n' "${C_YELLOW}${C_BOLD}" "$site" "${C_RESET}" "${C_BOLD}" "$gen" "${C_RESET}" >/dev/tty 2>/dev/null || true
-	fi
+	if gen=$(generated_secret "Administrator password for $site"); then show_secret_once "Administrator password for $site" "$gen"; fi
 	if ((!PROD)); then
 		grep -q '"developer_mode"\s*:\s*1' "$BENCH/sites/common_site_config.json" 2>/dev/null && b --site "$site" set-config developer_mode 1
 		[[ "$site" == *.localhost ]] || { ask_yes_no "Add $site to /etc/hosts?" y && b --site "$site" add-to-hosts; }
@@ -271,6 +269,19 @@ remove_site() {
 	success "$site removed."
 }
 
+change_admin_password() {
+	header "Change the Administrator password"
+	local site pw gen label
+	pick_site site "Change the Administrator password of which site?" || return 0
+	label="New Administrator password for $site"
+	ask_new_password pw "$label" "" "$( ((PROD)) && echo 8 || echo 4)" "$site" "${site%%.*}"
+	local -a args=(--site "$site" set-admin-password)
+	ask_yes_no "Also log out everyone who is logged in to $site?" n && args+=(--logout-all-sessions)
+	b "${args[@]}" "$pw"
+	if gen=$(generated_secret "$label"); then show_secret_once "$label" "$gen"; fi
+	success "The Administrator password of $site was changed."
+}
+
 set_default_site() {
 	local site
 	pick_site site "Make which site the default?" || return 0
@@ -323,6 +334,7 @@ menu_opts=(
 	"backup|Back up a site or all sites"
 	"restore|Restore a site from a backup"
 	"remove|Remove (drop) a site"
+	"admin-password|Change a site's Administrator password"
 	"default|Set the default site"
 )
 if ((PROD)); then
@@ -350,6 +362,7 @@ while true; do
 		backup) ( backup_site ) || warn "Backup did not finish." ;;
 		restore) ( restore_site ) || warn "Restore did not finish." ;;
 		remove) ( remove_site ) || warn "Removal did not finish." ;;
+		admin-password) ( change_admin_password ) || warn "The password was not changed." ;;
 		default) ( set_default_site ) || true ;;
 		devmode) ( toggle_developer_mode ) || true ;;
 		https) ( setup_https ) || warn "HTTPS setup did not finish." ;;

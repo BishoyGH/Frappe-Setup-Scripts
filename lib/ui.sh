@@ -351,13 +351,69 @@ gen_password() { # gen_password [length]
 	printf '%s' "${pw:0:len}"
 }
 
-# ask_new_password <varname> <label> [env-var] [min-length]
-# A new password: typed twice, or left empty to generate a strong one (shown in the final summary).
+# password_problem <password> [min-length]: print why the password cannot be used and fail, or succeed.
+password_problem() {
+	local pw=$1 min=${2:-1}
+	((${#pw} >= min)) || { echo "Use at least $min characters."; return 1; }
+	[[ "$pw" != *[[:cntrl:]]* ]] || { echo "Do not use tabs or other control characters."; return 1; }
+	[[ "$pw" =~ ^[[:space:]]|[[:space:]]$ ]] && { echo "Do not start or end the password with a space."; return 1; }
+	return 0
+}
+
+FSS_COMMON_PASSWORDS=(password passw0rd admin administrator root toor frappe erpnext bench mariadb mysql
+	changeme letmein welcome qwerty secret test default login master monkey dragon iloveyou)
+
+# password_weakness <password> [word...]: print why the password is weak and fail, or succeed.
+# The words (user name, site name) must not appear in the password.
+password_weakness() {
+	local pw=$1 lower core w classes=0; shift
+	lower=${pw,,}
+	core=${lower//[^a-z]/}
+	if [[ -z "${pw//"${pw:0:1}"/}" ]]; then echo "it repeats one character"; return 1; fi
+	for w in 01234567890123456789 98765432109876543210 abcdefghijklmnopqrstuvwxyz zyxwvutsrqponmlkjihgfedcba qwertyuiopasdfghjklzxcvbnm; do
+		[[ "$w" == *"$lower"* ]] && { echo "it is a simple sequence"; return 1; }
+	done
+	for w in "${FSS_COMMON_PASSWORDS[@]}"; do
+		[[ "$core" == "$w" ]] && { echo "it is a common password"; return 1; }
+	done
+	for w in "$@"; do
+		w=${w,,}
+		((${#w} >= 3)) && [[ "$lower" == *"$w"* ]] && { echo "it contains '$w'"; return 1; }
+	done
+	((${#pw} >= 12)) || { echo "it is shorter than 12 characters"; return 1; }
+	[[ "$pw" =~ [a-z] ]] && classes=$((classes + 1))
+	[[ "$pw" =~ [A-Z] ]] && classes=$((classes + 1))
+	[[ "$pw" =~ [0-9] ]] && classes=$((classes + 1))
+	[[ "$pw" =~ [^A-Za-z0-9] ]] && classes=$((classes + 1))
+	if ((classes < 3 && ${#pw} < 16)); then
+		echo "it mixes fewer than 3 kinds of characters (lowercase, uppercase, digits, symbols)"; return 1
+	fi
+	return 0
+}
+
+# ask_new_password <varname> <label> [env-var] [min-length] [word...]
+# A new password the user chooses: typed (hidden) twice and checked for strength, or left empty
+# to generate a strong one. Generated passwords are saved to $FSS_CRED_FILE (when set) right away,
+# so they survive a failed run, and are shown at the end. The words must not appear in the password.
+# With the env var set the password comes from it (unattended mode); weaknesses only warn there.
 ask_new_password() {
-	local __np_var=$1 __np_label=$2 __np_env=${3:-} __np_min=${4:-1} __np_a='' __np_b=''
+	local __np_var=$1 __np_label=$2 __np_env=${3:-} __np_min=${4:-1} __np_a='' __np_b='' __np_msg
+	shift "$(($# < 4 ? $# : 4))"
 	if [[ -n "$__np_env" && -n "${!__np_env:-}" ]]; then
-		printf -v "$__np_var" '%s' "${!__np_env}"
 		mask_secret "${!__np_env}"
+		if __np_msg=$(password_problem "${!__np_env}" "$__np_min"); then
+			__np_msg=$(password_weakness "${!__np_env}" "$@") || warn "$__np_env is weak: $__np_msg."
+		else
+			warn "$__np_env: $__np_msg"
+		fi
+		printf -v "$__np_var" '%s' "${!__np_env}"
+		return 0
+	fi
+	# Generated in an earlier run (see load_generated_secrets): keep using it.
+	if __np_a=$(generated_secret "$__np_label"); then
+		info "Using the password generated earlier for: $__np_label${FSS_CRED_FILE:+ (saved in $FSS_CRED_FILE)}."
+		mask_secret "$__np_a"
+		printf -v "$__np_var" '%s' "$__np_a"
 		return 0
 	fi
 	if [[ "${ASSUME_DEFAULTS:-0}" == 1 ]]; then
@@ -365,18 +421,22 @@ ask_new_password() {
 	fi
 	while true; do
 		if tui_active; then
-			_tui_secret __np_a "$__np_label"$'\n'"(leave empty to generate a strong password)" no 1
+			_tui_secret __np_a "$__np_label"$'\n'"Type a password, or leave empty to generate a strong one." no 1
 		else
-			printf '%s?%s %s %s(Enter = generate one)%s: ' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__np_label" "${C_DIM}" "${C_RESET}" >&2
+			printf '%s?%s %s %s(input hidden; Enter = generate one)%s: ' "${C_CYAN}${C_BOLD}" "${C_RESET}" "$__np_label" "${C_DIM}" "${C_RESET}" >&2
 			_tty_read __np_a -s; printf '\n' >&2
 		fi
 		if [[ -z "$__np_a" ]]; then
 			__np_a=$(gen_password 20)
 			FSS_GENERATED_SECRETS+=("$__np_label|$__np_a")
-			success "Generated a strong password for: $__np_label (shown at the end)."
+			[[ -n "${FSS_CRED_FILE:-}" ]] && { save_generated_secrets "$FSS_CRED_FILE" || true; }
+			success "Generated a strong password for: $__np_label (you will see it before the script ends)."
 			break
 		fi
-		if ((${#__np_a} < __np_min)); then ui_error "Use at least $__np_min characters."; continue; fi
+		if ! __np_msg=$(password_problem "$__np_a" "$__np_min"); then ui_error "$__np_msg"; continue; fi
+		if ! __np_msg=$(password_weakness "$__np_a" "$@"); then
+			ask_yes_no "This password is weak: $__np_msg. Use it anyway?" n || continue
+		fi
 		if tui_active; then
 			_tui_secret __np_b "Confirm: $__np_label" no 1
 		else
@@ -411,6 +471,25 @@ save_generated_secrets() {
 			for e in "${FSS_GENERATED_SECRETS[@]}"; do printf '%s: %s\n' "${e%%|*}" "${e#*|}"; done
 		} >"$file"
 	)
+}
+
+# load_generated_secrets <file>: read back passwords generated by an earlier, unfinished run.
+load_generated_secrets() {
+	local file=$1 line label value
+	[[ -r "$file" ]] || return 0
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		[[ -z "$line" || "$line" == \#* || "$line" != *": "* ]] && continue
+		label=${line%%: *} value=${line#*: }
+		[[ -n "$value" ]] || continue
+		generated_secret "$label" >/dev/null && continue
+		mask_secret "$value"
+		FSS_GENERATED_SECRETS+=("$label|$value")
+	done <"$file"
+}
+
+# show_secret_once <label> <password>: print a generated password on the terminal only (never the log).
+show_secret_once() {
+	printf '\n   %s%s:%s %s%s%s  (shown once, not logged)\n\n' "${C_YELLOW}${C_BOLD}" "$1" "${C_RESET}" "${C_BOLD}" "$2" "${C_RESET}" >/dev/tty 2>/dev/null || true
 }
 
 # --------------------------------------------------------------------------
